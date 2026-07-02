@@ -1457,7 +1457,6 @@ _ALIAS_TO_GETTER: dict[str, str] = {
     "secrets": "get_secret_manager",
     "web": "get_web_searcher",
     "files": "get_file_manager",
-    "workspace_files": "",
     "workspace_email": "",
     "integrations": "",
     "computer": "",
@@ -1630,11 +1629,6 @@ class Primitives:
     def computer(self) -> "ComputerPrimitives":
         """Computer use primitives (act, navigate, observe, query, etc.)."""
         return self._get_manager("computer")
-
-    @property
-    def workspace_files(self) -> Any:
-        """Allowlist-enforced connected workspace files (Drive/SharePoint/OneDrive)."""
-        return self._get_manager("workspace_files")
 
     @property
     def workspace_email(self) -> Any:

@@ -52,6 +52,35 @@ def test_as_message_id_normalizes_brackets(raw, expected):
     assert _as_message_id(raw) == expected
 
 
+def test_format_from_header_uses_explicit_name():
+    from unify.gateway.channels.gmail.views import _format_from_header
+
+    assert (
+        _format_from_header("staging-twin@unify.ai", "T-W1N")
+        == "T-W1N <staging-twin@unify.ai>"
+    )
+
+
+def test_format_from_header_preserves_existing_display_name():
+    from unify.gateway.channels.gmail.views import _format_from_header
+
+    assert (
+        _format_from_header("Existing Name <sender@example.com>")
+        == "Existing Name <sender@example.com>"
+    )
+
+
+@patch("unify.gateway.channels.gmail.views._resolve_directory_display_name")
+def test_format_from_header_falls_back_to_directory_name(mock_lookup):
+    from unify.gateway.channels.gmail.views import _format_from_header
+
+    mock_lookup.return_value = "T-W1N"
+    assert (
+        _format_from_header("staging-twin@unify.ai") == "T-W1N <staging-twin@unify.ai>"
+    )
+    mock_lookup.assert_called_once_with("staging-twin@unify.ai")
+
+
 @pytest.fixture
 def _gmail_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GCP_SA_KEY", "{}")

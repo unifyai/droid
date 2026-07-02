@@ -38,6 +38,7 @@ conversation while the Main CM Brain (slow brain) handles orchestration.
 """
 
 import asyncio
+import inspect
 import json
 from types import SimpleNamespace
 
@@ -1042,6 +1043,19 @@ async def test_recorded_opening_uses_interruptible_audio_say(monkeypatch):
 
             return _done().__await__()
 
+    class _FakeSpeechHandle:
+        interrupted = False
+
+        async def wait_for_playout(self):
+            return None
+
+        def done(self) -> bool:
+            return False
+
+        def interrupt(self, *, force: bool = False) -> "_FakeSpeechHandle":
+            self.interrupted = True
+            return self
+
     class _FakeLocalParticipant:
         async def publish_data(self, payload, *, topic=None, reliable=False):
             sequence.append(("data", json.loads(payload.decode()), topic, reliable))
@@ -1134,7 +1148,7 @@ async def test_recorded_opening_uses_interruptible_audio_say(monkeypatch):
         def say(self, text, **kwargs):
             sequence.append(("say", text, kwargs))
             self.say_calls.append((text, kwargs))
-            return _ImmediateAwaitable()
+            return _FakeSpeechHandle()
 
         def interrupt(self):
             pass
@@ -1166,7 +1180,7 @@ async def test_recorded_opening_uses_interruptible_audio_say(monkeypatch):
     async def _noop_end_call():
         return None
 
-    def _fake_recording_audio_frames(source):
+    def _fake_recording_audio_frames(source, **_kwargs):
         audio_sources.append(source)
         return fake_audio
 
@@ -1219,6 +1233,11 @@ async def test_recorded_opening_uses_interruptible_audio_say(monkeypatch):
         call_script,
         "_recording_audio_frames",
         _fake_recording_audio_frames,
+    )
+    monkeypatch.setattr(
+        call_script,
+        "_preload_recorded_opening_pcm",
+        lambda _config: {},
     )
     monkeypatch.setattr(
         call_script,
@@ -1286,11 +1305,25 @@ async def test_walkie_opener_arms_bridge_only_on_early_interruption(
             return _done().__await__()
 
     class _FakeSpeechHandle:
-        def __init__(self, interrupted):
+        def __init__(self, interrupted, *, spoken_text: str = ""):
             self.interrupted = interrupted
+            self._cancelled = False
+            self.chat_items = (
+                [SimpleNamespace(role="assistant", text_content=spoken_text)]
+                if interrupted
+                else []
+            )
 
         async def wait_for_playout(self):
             return None
+
+        def done(self) -> bool:
+            return self._cancelled
+
+        def interrupt(self, *, force: bool = False) -> "_FakeSpeechHandle":
+            self._cancelled = True
+            self.interrupted = True
+            return self
 
     class _FakeLocalParticipant:
         async def publish_data(self, payload, *, topic=None, reliable=False):
@@ -1360,6 +1393,7 @@ async def test_walkie_opener_arms_bridge_only_on_early_interruption(
             self.agent_state = "listening"
             self.current_speech = None
             self.say_calls = []
+            self.speech_handles = []
             self.generate_reply_calls = []
 
         @property
@@ -1384,7 +1418,10 @@ async def test_walkie_opener_arms_bridge_only_on_early_interruption(
             sequence.append(("say", text, kwargs))
             self.say_calls.append((text, kwargs))
             interrupted = interrupt_flags.pop(0) if interrupt_flags else False
-            return _FakeSpeechHandle(interrupted)
+            spoken_text = "Hi, I'm T dash W 1 N." if interrupted else ""
+            handle = _FakeSpeechHandle(interrupted, spoken_text=spoken_text)
+            self.speech_handles.append(handle)
+            return handle
 
         def interrupt(self):
             pass
@@ -1417,7 +1454,7 @@ async def test_walkie_opener_arms_bridge_only_on_early_interruption(
     async def _noop_end_call():
         return None
 
-    def _fake_recording_audio_frames(source):
+    def _fake_recording_audio_frames(source, **_kwargs):
         audio_sources.append(source)
         return fake_audio
 
@@ -1473,6 +1510,11 @@ async def test_walkie_opener_arms_bridge_only_on_early_interruption(
     )
     monkeypatch.setattr(
         call_script,
+        "_preload_recorded_opening_pcm",
+        lambda _config: {},
+    )
+    monkeypatch.setattr(
+        call_script,
         "create_end_call",
         lambda *args, **kwargs: _noop_end_call,
     )
@@ -1494,23 +1536,15 @@ async def test_walkie_opener_arms_bridge_only_on_early_interruption(
 
     session = session_holder["session"]
     assert session.generate_reply_calls == []
-    assert session.say_calls[0][0].startswith("Hi, I'm T dash W 1 N.")
+    assert len(session.say_calls) == 1
+    assert inspect.isasyncgen(session.say_calls[0][0])
+    assert audio_sources[0] == "asset://coordinator_onboarding_intro"
 
     if interrupt_walkie:
-        # Interrupting the first staticky sentence stops the opener immediately;
-        # no later sentence (nor the clean transition) plays, and the bridge is
-        # armed for the next turn.
-        assert audio_sources == ["asset://coordinator_onboarding_intro_walkie_00"]
-        assert len(session.say_calls) == 1
+        assert session.speech_handles[0].interrupted is True
         assert session.current_agent._pending_opening_bridge is not None
     else:
-        # All 20 staticky sentence slices play in order, then the clean
-        # transition segment, and no bridge is armed.
-        assert len(session.say_calls) == 21
-        assert audio_sources[0] == "asset://coordinator_onboarding_intro_walkie_00"
-        assert audio_sources[19] == "asset://coordinator_onboarding_intro_walkie_19"
-        assert audio_sources[-1] == "asset://coordinator_onboarding_intro_clean"
-        assert session.say_calls[-1][0].startswith("Much better.")
+        assert session.speech_handles[0].interrupted is False
         assert session.current_agent._pending_opening_bridge is None
 
 
@@ -1529,44 +1563,95 @@ def test_recorded_opening_builtin_asset_validates_without_single_transcript():
     assert config["recording_asset"] == "coordinator_onboarding_intro"
 
 
-def test_walkie_opener_segments_split_at_static_removal_transition():
+@pytest.mark.asyncio
+async def test_preloaded_recorded_opening_frames_match_file_decode():
+    from unify.conversation_manager.medium_scripts import call as call_script
+
+    config = {
+        "mode": "recorded",
+        "recording_asset": "coordinator_onboarding_intro",
+    }
+    preloaded = call_script._preload_recorded_opening_pcm(config)
+    assert len(preloaded) == 2
+    assert set(preloaded) == {
+        "coordinator_onboarding_intro",
+        "coordinator_onboarding_static_bridge",
+    }
+
+    asset_key = "coordinator_onboarding_intro"
+    file_frames = []
+    async for frame in call_script._recording_audio_frames(f"asset://{asset_key}"):
+        file_frames.append(frame)
+    preloaded_frames = []
+    async for frame in call_script._preloaded_audio_frames(preloaded[asset_key]):
+        preloaded_frames.append(frame)
+
+    assert len(preloaded_frames) == len(file_frames)
+    assert preloaded_frames[0].sample_rate == file_frames[0].sample_rate
+    assert preloaded_frames[-1].data == file_frames[-1].data
+
+
+def test_walkie_opener_timed_chunks_cover_static_removal_transition():
     from unify.conversation_manager.medium_scripts import call as call_script
 
     spec = call_script._RECORDED_OPENINGS["coordinator_onboarding_intro"]
-    segments = spec["segments"]
-    staticky = segments[:-1]
-    clean = segments[-1]
+    chunks = spec["timed_chunks"]
     bridge = spec["bridge"]
+    walkie = chunks[:20]
+    clean = chunks[20:]
 
-    # The staticky intro is split into per-sentence segments; the final one is
-    # the spoken static-removal cue. The clean segment opens after the transition.
-    assert len(staticky) == 20
-    assert staticky[0]["transcript"].startswith("Hi, I'm T dash W 1 N.")
-    assert (
-        staticky[-1]["transcript"].rstrip() == "Also, let me remove this voice static."
+    assert len(walkie) == 20
+    assert walkie[0]["text"] == "Hi, I'm T dash W 1 N."
+    assert walkie[-1]["text"] == "Also, let me remove this voice static."
+    for chunk in walkie:
+        assert "Much better." not in chunk["text"]
+    assert clean[0]["text"] == "Much better."
+    assert float(clean[0]["start_time"]) == pytest.approx(
+        call_script._COORDINATOR_ONBOARDING_CLEAN_START_TIME,
     )
-    for seg in staticky:
-        assert "Much better." not in seg["transcript"]
-    assert clean["transcript"].startswith("Much better.")
 
-    # The bridge re-performs the static removal for callers who interrupted the
-    # walkie segment before the transition.
     assert "remove this voice static" in bridge["transcript"]
     assert "Much better." in bridge["transcript"]
 
-    # Each segment resolves to its own bundled asset.
-    for segment in (*staticky, clean, bridge):
-        assert segment["asset"] in call_script._RECORDED_OPENING_ASSETS
+    for key in (spec["asset"], bridge["asset"]):
+        assert key in call_script._RECORDED_OPENING_ASSETS
 
-    # Older ad-lib lines stay redacted from the spoken transcripts.
     combined = (
-        "".join(seg["transcript"] for seg in staticky)
-        + clean["transcript"]
-        + bridge["transcript"]
+        call_script._recorded_opening_timed_transcript(chunks) + bridge["transcript"]
     )
     assert "Krispy Kreme" not in combined
     assert "Actually, first lets turn off this really annoying music." not in combined
     assert "There we go, now I'll pull up the platform." not in combined
+
+
+def test_coordinator_onboarding_timed_chunks_match_audio():
+    import soundfile as sf
+    from importlib import resources
+
+    from unify.conversation_manager.medium_scripts import call as call_script
+
+    chunks = call_script._COORDINATOR_ONBOARDING_TIMED_CHUNKS
+    assert len(chunks) == 23
+    assert chunks[0]["text"] == "Hi, I'm T dash W 1 N."
+    assert chunks[19]["text"] == "Also, let me remove this voice static."
+    assert chunks[20]["text"] == "Much better."
+
+    with resources.as_file(
+        resources.files("unify.assets.audio") / "twin-onboarding-intro.mp3",
+    ) as intro_path:
+        full_duration = sf.info(intro_path).duration
+
+    assert float(chunks[-1]["end_time"]) == pytest.approx(full_duration, abs=0.01)
+    assert float(chunks[20]["start_time"]) == pytest.approx(
+        call_script._COORDINATOR_ONBOARDING_CLEAN_START_TIME,
+        abs=0.01,
+    )
+
+    for index in range(1, len(chunks)):
+        assert float(chunks[index]["start_time"]) == pytest.approx(
+            float(chunks[index - 1]["end_time"]),
+            abs=1e-6,
+        )
 
 
 @pytest.mark.asyncio

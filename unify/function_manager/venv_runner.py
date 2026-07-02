@@ -41,6 +41,18 @@ from contextlib import redirect_stderr, redirect_stdout
 from queue import Queue
 from typing import Any, Dict
 
+# Defense-in-depth: strip any raw provider OAuth token that may have leaked into
+# this sandbox process via inherited environment. Connected-provider REST is
+# reached only through the trusted localhost proxy (see unify.provider_proxy),
+# never with a raw token held in the sandbox.
+for _leaked_token in (
+    "MICROSOFT_ACCESS_TOKEN",
+    "MICROSOFT_REFRESH_TOKEN",
+    "GOOGLE_ACCESS_TOKEN",
+    "GOOGLE_REFRESH_TOKEN",
+):
+    os.environ.pop(_leaked_token, None)
+
 # ────────────────────────────────────────────────────────────────────────────
 # Signal Handling for Graceful Shutdown
 # ────────────────────────────────────────────────────────────────────────────
@@ -802,15 +814,23 @@ def apply_env_overlay(env_overlay: dict | None) -> None:
     """Apply parent-supplied runtime env updates inside the child process.
 
     The venv runner can be a long-lived subprocess, so inherited environment
-    variables may be older than Unity's parent runtime.  The parent sends only
-    the runtime overlay needed for execution, currently rotating OAuth token
-    variables, before each function call.
+    variables may be older than Unity's parent runtime. The parent sends the
+    localhost workspace-proxy endpoints (base URLs + nonce) before each call.
+    Raw provider OAuth tokens are never overlaid; any that slipped in are
+    scrubbed defensively.
     """
     if not env_overlay:
         return
     for key, value in env_overlay.items():
         if isinstance(key, str) and isinstance(value, str):
             os.environ[key] = value
+    for leaked in (
+        "MICROSOFT_ACCESS_TOKEN",
+        "MICROSOFT_REFRESH_TOKEN",
+        "GOOGLE_ACCESS_TOKEN",
+        "GOOGLE_REFRESH_TOKEN",
+    ):
+        os.environ.pop(leaked, None)
 
 
 # ────────────────────────────────────────────────────────────────────────────

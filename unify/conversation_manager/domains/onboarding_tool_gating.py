@@ -32,10 +32,10 @@ def masked_reference_quiz_tools(
 ) -> set[str]:
     """Return the unity send-tool names to withhold for this turn.
 
-    A reference-quiz trigger step's tool is masked iff onboarding is active
-    (render present) AND the step is not ``done``/``skipped`` AND its
-    trigger-step id is not in ``clicked_trigger_steps`` (clicked this session).
-    Anything missing or malformed yields no masking (fail open).
+    A reference-quiz trigger step's tool is masked iff ``onboarding_active``
+    is true, onboarding render is present, the step is not ``done``/``skipped``
+    AND its trigger-step id is not in ``clicked_trigger_steps`` (clicked this
+    session). Anything missing or malformed yields no masking (fail open).
     """
     if not isinstance(onboarding_render, dict):
         return set()

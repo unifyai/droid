@@ -81,6 +81,11 @@ class SecretManager(BaseSecretManager):
         self._assistant_secret_sync_lock = Lock()
         self._last_assistant_secret_sync_success_at: float | None = None
         self._last_assistant_secret_sync_failure_at: float | None = None
+        # Raw provider access/refresh tokens live here only -- never in the
+        # Secrets context, .env, or os.environ -- so sandboxed actor code cannot
+        # read them and bypass the workspace file-access allowlist. The trusted
+        # provider proxy reads them via ``get_oauth_token``.
+        self._oauth_tokens: dict[str, str] = {}
 
         # Ensure storage/schema exists deterministically (idempotent)
         self._provision_storage()
@@ -323,6 +328,31 @@ class SecretManager(BaseSecretManager):
         except Exception:
             return cls._BUILTIN_OAUTH_SECRET_ALLOWLIST
 
+    @classmethod
+    def _sensitive_oauth_token_names(cls) -> frozenset[str]:
+        """Raw access/refresh token names held in-memory only (never in env)."""
+        try:
+            from unify.common.runtime_oauth import refresh_token_oauth_token_names
+
+            return refresh_token_oauth_token_names()
+        except Exception:
+            return frozenset(
+                {
+                    "GOOGLE_ACCESS_TOKEN",
+                    "GOOGLE_REFRESH_TOKEN",
+                    "MICROSOFT_ACCESS_TOKEN",
+                    "MICROSOFT_REFRESH_TOKEN",
+                },
+            )
+
+    def get_oauth_token(self, name: str) -> str | None:
+        """Return a raw provider token from the in-memory OAuth store.
+
+        Trusted-runtime accessor used by :func:`runtime_oauth.get_provider_access_token`.
+        Never expose the returned value to sandboxed code.
+        """
+        return self._oauth_tokens.get(name)
+
     def _sync_assistant_secrets(self) -> None:
         """Mirror runtime OAuth assistant secrets from Orchestra into local state.
 
@@ -372,12 +402,21 @@ class SecretManager(BaseSecretManager):
         # through this sync because they already live in the local Secrets
         # context and are exported by _sync_dotenv.
         active_allowlist = self._resolve_secret_allowlist()
+        sensitive = self._sensitive_oauth_token_names()
 
         written = 0
         for name, value in secrets_dict.items():
             if name not in active_allowlist:
                 continue
             if not isinstance(value, str) or not value:
+                continue
+            # Raw access/refresh tokens are held in-memory only, never mirrored
+            # to the Secrets context / .env / os.environ, so the sandbox cannot
+            # read them. Non-sensitive OAuth metadata (expiry, granted scopes)
+            # still flows to the context/env for scope and freshness checks.
+            if name in sensitive:
+                self._oauth_tokens[name] = value
+                written += 1
                 continue
             try:
                 existing = unisdk.get_logs(
@@ -420,6 +459,9 @@ class SecretManager(BaseSecretManager):
         # Console-pasted integration credentials live in the same local Secrets
         # context but are not removed based on the admin assistant payload.
         for stale_name in active_allowlist - secrets_dict.keys():
+            if stale_name in sensitive:
+                self._oauth_tokens.pop(stale_name, None)
+                continue
             try:
                 ids = unisdk.get_logs(
                     context=self._ctx,
@@ -437,9 +479,10 @@ class SecretManager(BaseSecretManager):
         """Mirror the workspace file-access allowlist into the runtime policy store.
 
         Orchestra owns the per-assistant, per-provider Drive/SharePoint
-        allowlist (configured in Console). The enforcement connector
-        (``primitives.workspace_files``) reads it from an in-process cache; this
-        keeps that cache current. Best-effort: failures leave the prior cache.
+        allowlist (configured in Console). The localhost provider proxy reads it
+        from this in-process cache to enforce access on every Drive/Graph call;
+        this keeps that cache current. Best-effort: failures leave the prior
+        cache.
         """
         from ..session_details import SESSION_DETAILS
 
@@ -454,7 +497,7 @@ class SecretManager(BaseSecretManager):
 
         from unisdk.utils import http
 
-        from unify.workspace_files.policy import get_policy_store
+        from unify.provider_proxy.policy import get_policy_store
 
         resp = http.get(
             f"{base_url}/admin/assistant/{int(agent_id)}/workspace-file-access",

@@ -556,6 +556,9 @@ class TestCoordinatorVoicePrompt:
         assert "Two ways to accomplish org tasks" not in prompt
         assert "My onboarding flow (UI reference)" not in prompt
         assert "Console knowledge\n-----------------" not in prompt
+        assert "My opening turn" not in prompt
+        assert "Onboarding checklist" not in prompt
+        assert "Step-by-step walkthrough pacing" not in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +670,20 @@ class TestExternalAppIntegration:
     def test_act_capabilities_absent_in_demo_mode(self):
         prompt = _build(demo_mode=True)
         assert "**External apps & services**" not in prompt
+
+
+class TestExternalResourcesActBlock:
+    """External-resource work must go through ``act``."""
+
+    def test_external_resources_block_present(self):
+        prompt = _build()
+        assert "External resources (use ``act``)" in prompt
+        assert "Ground truth rule" in prompt
+        assert "I do not answer from memory" in prompt
+
+    def test_external_resources_block_absent_in_demo_mode(self):
+        prompt = _build(demo_mode=True)
+        assert "External resources (use ``act``)" not in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -1000,3 +1017,44 @@ class TestSmalltalkMessages:
         assert "Idle small-talk exception" in prompt
         assert "playing Snake" in prompt
         assert "no in-flight action" in prompt
+
+
+class TestOnboardingPromptLeakageGuard:
+    """Onboarding and general restraint blocks must not invite parroting."""
+
+    def test_conversational_restraint_forbids_prompt_leakage(self):
+        prompt = _build()
+        assert "No prompt leakage" in prompt
+        assert "never quote, paraphrase, or summarize" in prompt
+
+    def test_coordinator_onboarding_narration_forbids_parroting(self):
+        prompt = _build(is_coordinator=True)
+        assert "My onboarding narration" in prompt
+        assert "internal guidance — I never repeat it to the user" in prompt
+        assert "No genre lists, franchise names" in prompt
+
+    def test_coordinator_onboarding_scaffolding_omitted_when_inactive(self):
+        prompt = _build(
+            is_coordinator=True,
+            coordinator_onboarding_active=False,
+        )
+        assert "My onboarding narration" not in prompt
+        assert "My onboarding progress (live)" not in prompt
+
+    def test_coordinator_onboarding_scaffolding_present_when_active(self):
+        prompt = _build(
+            is_coordinator=True,
+            coordinator_onboarding_active=True,
+            coordinator_onboarding_render={
+                "steps": [],
+                "next_targets": [],
+            },
+        )
+        assert "My onboarding narration" in prompt
+
+    def test_reference_quiz_rules_omit_parrotable_franchise_lists(self):
+        prompt = _build(is_coordinator=True)
+        assert "Star Wars" not in prompt
+        assert "Blade Runner" not in prompt
+        assert "quick sci-fi quiz" in prompt
+        assert "I NEVER list genres, franchises" in prompt

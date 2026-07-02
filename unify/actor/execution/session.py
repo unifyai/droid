@@ -803,6 +803,16 @@ class SessionExecutor:
         started = datetime.now(timezone.utc)
         t0 = started.timestamp()
 
+        # Ensure the localhost provider proxy is up before any code runs so its
+        # base URLs / nonce are available to both in-process and subprocess
+        # backends (connected-provider REST is reached only through it).
+        try:
+            from unify.provider_proxy.proxy import ensure_proxy_running
+
+            ensure_proxy_running()
+        except Exception:
+            _se_log.warning("provider proxy failed to start", exc_info=True)
+
         # Default: use actor computer primitives (if any).
         if computer_primitives is None:
             computer_primitives = self._computer_primitives

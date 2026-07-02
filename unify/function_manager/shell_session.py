@@ -87,13 +87,16 @@ class ShellSession:
         return commands[self.language]
 
     def _build_env(self) -> Optional[Dict[str, str]]:
-        """Build the environment dict for the subprocess."""
-        if self.initial_env is None:
-            return None
-        import os
+        """Build the environment dict for the subprocess.
 
-        env = os.environ.copy()
-        env.update(self.initial_env)
+        Always sanitized via ``build_sandbox_env`` so no raw provider OAuth
+        token is inherited and the localhost proxy endpoints are present.
+        """
+        from unify.provider_proxy.session import build_sandbox_env
+
+        env = build_sandbox_env()
+        if self.initial_env:
+            env.update(self.initial_env)
         return env
 
     async def start(self) -> None:

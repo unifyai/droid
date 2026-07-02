@@ -23,6 +23,7 @@ import uuid
 from typing import TYPE_CHECKING, Any, Mapping
 
 from unify.common.hierarchical_logger import DEFAULT_ICON
+from unify.common.plain_text import normalize_outbound_plain_text
 from unify.common.prompt_helpers import now as prompt_now
 from unify.conversation_manager.cm_types import Medium
 from unify.conversation_manager.domains import comms_utils
@@ -683,6 +684,7 @@ class CommsPrimitives:
             why the send was rejected or failed.
         """
         contact_id = _coerce_contact_id(contact_id)
+        content = normalize_outbound_plain_text(content)
         offline_reservation = None
         contact = self._get_contact(contact_id=contact_id)
 
@@ -879,6 +881,7 @@ class CommsPrimitives:
             entered the live resend flow.
         """
         contact_id = _coerce_contact_id(contact_id)
+        content = normalize_outbound_plain_text(content)
         offline_reservation = None
         contact = self._get_contact(contact_id=contact_id)
 
@@ -1237,6 +1240,7 @@ class CommsPrimitives:
             why the DM could not be sent.
         """
         contact_id = _coerce_contact_id(contact_id)
+        content = normalize_outbound_plain_text(content)
         offline_reservation = None
         contact = self._get_contact(contact_id=contact_id)
         topic = "app:comms:discord_message_sent"
@@ -1405,6 +1409,7 @@ class CommsPrimitives:
         normalized_contact_id = (
             _coerce_contact_id(contact_id) if contact_id is not None else None
         )
+        content = normalize_outbound_plain_text(content)
         offline_reservation = None
         resolved_contact = self._normalize_optional_contact(normalized_contact_id)
         if resolved_contact is not None:
@@ -1566,6 +1571,7 @@ class CommsPrimitives:
             why the DM could not be sent.
         """
         contact_id = _coerce_contact_id(contact_id)
+        content = normalize_outbound_plain_text(content)
         offline_reservation = None
         contact = self._get_contact(contact_id=contact_id)
         topic = "app:comms:slack_message_sent"
@@ -1611,6 +1617,22 @@ class CommsPrimitives:
                 history_metadata={
                     "contact_display_name": _get_contact_display_name(contact),
                 },
+            )
+
+        # Reach a workspace member we've never received a Slack message from:
+        # when the contact has an email but no Slack user ID on file (and none
+        # was supplied inline), resolve it from the email via the workspace
+        # bot (users.lookupByEmail). _resolve_or_attach_detail then persists it
+        # onto the contact, so this lookup happens at most once per contact.
+        if (
+            slack_user_id is None
+            and contact is not None
+            and not contact.get("slack_user_id")
+            and contact.get("email_address")
+        ):
+            slack_user_id = await comms_utils.resolve_slack_user_id_by_email(
+                team_id=team_id,
+                email=contact["email_address"],
             )
 
         detail_error, contact = self._resolve_or_attach_detail(
@@ -1764,6 +1786,7 @@ class CommsPrimitives:
         normalized_contact_id = (
             _coerce_contact_id(contact_id) if contact_id is not None else None
         )
+        content = normalize_outbound_plain_text(content)
         offline_reservation = None
         resolved_contact = self._normalize_optional_contact(normalized_contact_id)
         if resolved_contact is not None:
@@ -1951,6 +1974,7 @@ class CommsPrimitives:
             ``{"status": "ok"}`` on success, or an error payload describing
             why the send could not complete.
         """
+        content = normalize_outbound_plain_text(content)
         offline_reservation = None
         is_channel = bool(channel_id and team_id)
         is_chat_reply = bool(chat_id) and not is_channel
@@ -2802,6 +2826,7 @@ class CommsPrimitives:
             why the message or attachment flow failed.
         """
         contact_id = _coerce_contact_id(contact_id)
+        content = normalize_outbound_plain_text(content)
         offline_reservation, offline_response = self._reserve_offline_operation(
             method_name="send_unify_message",
             medium=Medium.UNIFY_MESSAGE,
@@ -3189,6 +3214,7 @@ class CommsPrimitives:
             ``{"status": "ok"}`` on success, or an error payload describing
             why the email could not be sent.
         """
+        body = normalize_outbound_plain_text(body)
         from unify.file_manager.filesystem_adapters.local_adapter import (
             LocalFileSystemAdapter,
         )

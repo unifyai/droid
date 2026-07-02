@@ -1,8 +1,9 @@
 """Fast-brain reply selection.
 
 The fast brain (voice agent) does not compose the real answer — the slow brain
-does, moments later. On each user turn the fast brain gives ONE brief, natural,
-in-the-moment reaction to cover that gap and sound present rather than robotic.
+does, moments later. On each user turn the fast brain gives ONE brief, natural
+acknowledgement to cover that gap — not a substantive reply, just a quick sign
+the caller was heard.
 
 It is no longer a fixed phrase bank: it is prompted with patterns/templates that
 it adapts and fills in (e.g. "Yes, I'll let you know once {X}"), held to a hard
@@ -29,9 +30,9 @@ _DEFAULT_PHRASE = "One moment."
 _MAX_FAST_REPLY_CHARS = 160
 
 _FAST_REPLY_PROMPT = """\
-You give a brief, natural, in-the-moment reply on a live voice call. The real
+You give a brief, natural acknowledgement on a live voice call. The real
 answer is being composed and will be spoken right after you — your only job is to
-sound present and human in that gap, never robotic.
+acknowledge what the caller just said in that gap, briefly and naturally.
 
 STAY ONE PERSON — to the caller you are a single person. Never disown your own
 words or split yourself into separate agents: never say a word "wasn't you",
@@ -41,9 +42,9 @@ caller questions what you said, just own it naturally as yourself.
 
 HARD RULE — you NEVER actually answer or give real information: no facts, data,
 names, numbers, results, instructions, or next steps. That is handled moments
-from now. You only react, acknowledge, agree, reassure, or say you're getting
-something. If a real reply would need anything you were not just told, you do NOT
-attempt it — you briefly defer instead.
+from now. You only acknowledge what they said, agree, or briefly defer (say
+you're getting something). If a real reply would need anything you were not just
+told, you do NOT attempt it — you briefly defer instead.
 
 MUST CONTEXTUALIZE — your reply ALWAYS refers back to what the caller just said:
 their topic, the action they took, or what they asked for. NEVER reply with a
@@ -52,9 +53,9 @@ bare, standalone phrase like "Got it.", "One moment.", "Nice.", "Perfect.", or
 like you received a thing). Always attach the specific thing, e.g. "Got it —
 looking into your email now." instead of "Got it."
 
-Reply as a present, attentive person would to what they just said. Adapt these
-patterns to the moment, fill in the specifics in {braces}, keep it to a few
-words, and never recite them verbatim:
+Acknowledge what they just said — name the topic or action, not your availability.
+Adapt these patterns to the moment, fill in the specifics in {braces}, keep it to
+a few words, and never recite them verbatim:
 - They tell you something or confirm an action → a quick contextual ack: "Got it — I'll check on that now." / "Nice, that's the {thing} sorted."
 - They give you space ("take your time", "no rush", "whenever you're ready") → thank them and take the pause, anchored to it: "Thanks — I'll keep at it." / "No problem, I'll stay on it." NEVER say you're checking or looking anything up here.
 - They ask you to do or relay something ("let me know when it's done") → confirm you will, naming it: "Will do — I'll let you know once {the thing} is ready."
@@ -66,10 +67,9 @@ One short line only, always tied to what they just said."""
 
 _ALREADY_DEFERRED_NOTE = """\
 You have already deferred to this caller and are STILL waiting for the real reply
-to land. Do not start a fresh lookup or re-explain why — just briefly, warmly
-reassure them it's coming, anchored to what they're waiting on ("Bear with me,
-almost there with your {thing}.") or, if they just gave you space, simply thank
-them."""
+to land. Do not start a fresh lookup or re-explain why — just briefly acknowledge
+you're still on it, anchored to what they're waiting on ("Bear with me, almost
+there with your {thing}.") or, if they just gave you space, simply thank them."""
 
 # Present ONLY when the smarter system bundled a note for this exact moment. It
 # is the single, deliberate exception to the no-real-information HARD RULE. Kept
@@ -237,8 +237,8 @@ async def select_fast_reply(
     The reply is freeform but template-guided (see the prompt) and must never be
     a substantive answer. ``recent_assistant_text`` is the assistant's previous
     spoken line (given as context + an anti-repeat nudge). ``already_deferred``
-    marks a repeated deferral in the same wait streak, so the reply reassures
-    rather than starting a fresh lookup. ``guidance`` is an optional short note
+    marks a repeated deferral in the same wait streak, so the reply acknowledges
+    the wait rather than starting a fresh lookup. ``guidance`` is an optional short note
     the smarter system bundled for this moment; when present it adds a scoped
     block letting the reply directly answer the caller's just-said point (the one
     exception to the no-real-information rule).

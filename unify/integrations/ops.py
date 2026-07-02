@@ -157,5 +157,27 @@ def test_connection(connection_id: str) -> Any:
         return _request_failed("test_integration_connection", exc)
 
 
+def stage_composio_file(
+    content: bytes,
+    *,
+    filename: str,
+    mimetype: str,
+    toolkit_slug: str,
+    tool_slug: str,
+) -> Any:
+    try:
+        return unisdk.stage_composio_file(
+            content,
+            filename=filename,
+            mimetype=mimetype,
+            toolkit_slug=toolkit_slug,
+            tool_slug=tool_slug,
+        )
+    except KeyError:
+        raise
+    except Exception as exc:
+        return _request_failed("stage_composio_file", exc)
+
+
 def _clean_scope(scope: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in scope.items() if value is not None}

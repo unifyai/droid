@@ -165,9 +165,10 @@ def test_code_act_prompt_teaches_refresh_token_oauth_helper():
     ) in prompt
     assert 'get_oauth_access_token("microsoft")' in prompt
     assert 'get_oauth_access_token("google")' in prompt
-    assert "refresh-token backed OAuth" in prompt
-    assert "Do not print, log, return, or store the token value." in prompt
-    assert "provider sdk/default credential behavior" in prompt.lower()
+    # The helper now returns a local proxy capability handle, not a raw token.
+    assert "capability handle" in prompt
+    assert "Do not print, log, return, or store this handle." in prompt
+    assert "MICROSOFT_GRAPH_BASE" in prompt
 
 
 @pytest.mark.timeout(30)

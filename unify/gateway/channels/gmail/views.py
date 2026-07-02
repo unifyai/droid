@@ -31,6 +31,7 @@ from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr, parseaddr
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -120,6 +121,42 @@ def _gmail_send_log_context(
         "has_thread_id": bool(thread_id),
         "has_attachment": bool(attachment),
     }
+
+
+def _resolve_directory_display_name(email: str) -> str | None:
+    """Return the Workspace Directory full name for *email*, if available."""
+    try:
+        service = get_admin_service()
+        user = service.users().get(userKey=email, projection="full").execute()
+    except Exception:
+        logger.warning(
+            "Could not resolve Workspace display name for %s",
+            email,
+            exc_info=True,
+        )
+        return None
+    name = user.get("name") or {}
+    full_name = (name.get("fullName") or "").strip()
+    if full_name:
+        return full_name
+    given_name = (name.get("givenName") or "").strip()
+    family_name = (name.get("familyName") or "").strip()
+    combined = " ".join(part for part in (given_name, family_name) if part).strip()
+    return combined or None
+
+
+def _format_from_header(sender: str, from_name: str | None = None) -> str:
+    """Build a RFC 5322 From header with a human-readable display name."""
+    existing_name, addr = parseaddr(sender)
+    if not addr:
+        addr = sender.strip()
+        existing_name = ""
+    display_name = (from_name or existing_name or "").strip()
+    if not display_name and addr.lower().endswith("@unify.ai"):
+        display_name = (_resolve_directory_display_name(addr) or "").strip()
+    if display_name:
+        return formataddr((display_name, addr))
+    return addr
 
 
 def _service_account_credentials(
@@ -296,6 +333,7 @@ async def send_email(request: Request):
     """
     data = await request.json()
     sender = data.get("from")
+    from_name = data.get("from_name")
     to = data.get("to")
     cc = data.get("cc")
     bcc = data.get("bcc")
@@ -312,7 +350,7 @@ async def send_email(request: Request):
         )
 
     msg = MIMEMultipart()
-    msg["from"] = sender
+    msg["from"] = _format_from_header(sender, from_name)
     msg["to"] = to if isinstance(to, str) else ",".join(to)
     if cc:
         msg["cc"] = cc if isinstance(cc, str) else ",".join(cc)

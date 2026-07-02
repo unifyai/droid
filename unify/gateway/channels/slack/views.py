@@ -259,6 +259,60 @@ async def slack_user_info(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# POST /user-by-email
+# ---------------------------------------------------------------------------
+
+
+async def lookup_slack_user_id_by_email(team_id: str, email: str) -> str | None:
+    """Resolve a Slack user ID from an email via ``users.lookupByEmail``.
+
+    This is the reverse of ``users.info`` and the only way to reach a
+    workspace member the bot has never heard from: given a contact's email
+    it returns their Slack user ID so an assistant can open a DM. Returns
+    ``None`` when the workspace has no member with that email
+    (``users_not_found``), when the bot lacks the ``users:read.email``
+    scope, or when the email is empty — the caller treats any ``None`` as
+    "unresolved" and falls back to its existing behaviour.
+    """
+    if not email:
+        return None
+    bot_token = await _resolve_bot_token(team_id)
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{SLACK_API_BASE}/users.lookupByEmail",
+            params={"email": email},
+            headers={"Authorization": f"Bearer {bot_token}"},
+            timeout=10.0,
+        )
+    payload = resp.json()
+    if not payload.get("ok"):
+        logger.warning(
+            f"slack users.lookupByEmail failed: {_log_field(payload.get('error'))}",
+        )
+        return None
+    return (payload.get("user") or {}).get("id") or None
+
+
+@auth_router.post("/user-by-email")
+async def slack_user_by_email(request: Request):
+    """Resolve a Slack user ID from an email via ``users.lookupByEmail``.
+
+    Body::
+
+        {"team_id": str, "email": str}
+
+    Returns ``{"slack_user_id": str | None}``. Lets the outbound pipeline
+    reach a contact that has an email on file but no Slack user ID yet.
+    """
+    data = await request.json()
+    slack_user_id = await lookup_slack_user_id_by_email(
+        data["team_id"],
+        data.get("email") or "",
+    )
+    return {"slack_user_id": slack_user_id}
+
+
+# ---------------------------------------------------------------------------
 # GET /status
 # ---------------------------------------------------------------------------
 

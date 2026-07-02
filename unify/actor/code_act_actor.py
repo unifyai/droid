@@ -2635,12 +2635,14 @@ class CodeActActor(BaseCodeActActor):
 
             Runtime credential helpers
             --------------------------
-            Python execution globals include
-            ``get_oauth_access_token(provider)`` for refresh-token backed OAuth
-            providers when a provider SDK, client, or direct HTTP request needs
-            an explicit access token. Static API keys and provider SDKs that
-            read credentials from the environment may still use ``os.environ``
-            after checking available secret names.
+            Python execution globals include ``get_oauth_access_token(provider)``
+            for connected-account (BYOD) OAuth. It returns a local capability
+            handle (not a raw token) to use with the workspace proxy base URLs
+            (``MICROSOFT_GRAPH_BASE`` / ``GOOGLE_DRIVE_BASE`` / ``GOOGLE_API_BASE``);
+            the proxy injects the real token and enforces the file-access
+            allowlist. Static API keys and provider SDKs that read credentials
+            from the environment may still use ``os.environ`` after checking
+            available secret names.
 
             For in-process Python execution with rich output, the result is wrapped in an
             ExecutionResult object (a Pydantic model implementing FormattedToolResult).

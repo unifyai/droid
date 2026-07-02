@@ -8,6 +8,7 @@ from pathlib import Path
 
 from unify.logger import LOGGER
 from unify.common.hierarchical_logger import ICONS
+from unify.common.plain_text import normalize_outbound_plain_text
 from unify.session_details import SESSION_DETAILS
 from unify.settings import SETTINGS
 
@@ -171,6 +172,8 @@ async def send_sms_message_via_number(to_number: str, content: str) -> str:
     if not from_number:
         return {"success": False}
 
+    content = normalize_outbound_plain_text(content)
+
     async with aiohttp.ClientSession() as session:
         async with session.post(
             f"{_gateway_comms_base_url()}/phone/send-text",
@@ -219,6 +222,8 @@ async def send_whatsapp_message(
     agent_id = SESSION_DETAILS.assistant.agent_id
     if agent_id is None:
         return {"success": False}
+
+    content = normalize_outbound_plain_text(content)
 
     payload = {
         "to": to_number,
@@ -290,6 +295,8 @@ async def send_unify_message(
     Returns:
         dict with "success" key indicating delivery status.
     """
+    content = normalize_outbound_plain_text(content)
+
     agent_id = SESSION_DETAILS.assistant.agent_id
     event_data = {"content": content, "role": "assistant", "contact_id": contact_id}
     if attachment:
@@ -617,6 +624,8 @@ async def send_discord_message(
     if agent_id is None:
         return {"success": False}
 
+    body = normalize_outbound_plain_text(body)
+
     payload: dict = {
         "body": body,
         "assistant_id": agent_id,
@@ -681,6 +690,8 @@ async def send_slack_message(
     if agent_id is None:
         return {"success": False}
 
+    body = normalize_outbound_plain_text(body)
+
     payload: dict = {
         "team_id": team_id,
         "body": body,
@@ -736,6 +747,40 @@ async def resolve_slack_user_profile(
             return await response.json()
 
 
+async def resolve_slack_user_id_by_email(
+    *,
+    team_id: str,
+    email: str,
+) -> str | None:
+    """Resolve a Slack user ID from an email via the Communication gateway.
+
+    The reverse of ``resolve_slack_user_profile``: given a contact's email
+    it returns their Slack user ID (via ``users.lookupByEmail``), so an
+    assistant can DM a workspace member it has never received a message
+    from. Returns ``None`` when the workspace has no member with that email,
+    when the bot lacks the ``users:read.email`` scope, or on any failure —
+    callers treat ``None`` as "unresolved" and fall back to their existing
+    behaviour.
+    """
+    if not email:
+        return None
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{SETTINGS.conversation.COMMS_URL}/slack/user-by-email",
+            headers=headers,
+            json={"team_id": team_id, "email": email},
+        ) as response:
+            try:
+                response.raise_for_status()
+            except Exception as e:
+                LOGGER.error(
+                    f"{ICONS['comms_outbound']} Slack user-by-email failed: {e}",
+                )
+                return None
+            result = await response.json()
+            return result.get("slack_user_id") or None
+
+
 async def send_teams_message(
     chat_id: str | None = None,
     team_id: str | None = None,
@@ -766,6 +811,9 @@ async def send_teams_message(
     from_email = SESSION_DETAILS.assistant.email
     if not from_email:
         return {"success": False, "error": "No sender email configured"}
+
+    if content_type == "text":
+        body = normalize_outbound_plain_text(body)
 
     payload: dict = {
         "from": from_email,
@@ -1087,6 +1135,9 @@ async def send_email_via_address(
     if not from_email:
         return {"success": False, "error": "No sender email configured"}
 
+    body = normalize_outbound_plain_text(body)
+    from_name = (SESSION_DETAILS.assistant.name or "").strip()
+
     payload = {
         "from": from_email,
         "to": to,
@@ -1094,6 +1145,8 @@ async def send_email_via_address(
         "body": body,
         "in_reply_to": email_id,
     }
+    if from_name:
+        payload["from_name"] = from_name
     if thread_id:
         payload["thread_id"] = thread_id
     if cc:

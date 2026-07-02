@@ -4,6 +4,7 @@ import json
 import queue
 import asyncio
 import threading
+from dataclasses import dataclass
 from importlib import resources
 
 os.environ["UNITY_TERMINAL_LOG"] = "true"
@@ -26,6 +27,7 @@ from livekit.plugins import (
     elevenlabs,
     silero,
 )
+from livekit.agents.voice.io import TimedString
 
 from unify.conversation_manager.livekit_unify_adapter import UnifyLLM
 
@@ -821,109 +823,241 @@ _SMALLTALK_STAY_SILENT = object()
 # disconnect gracefully on its own.
 MEET_GRACEFUL_LEAVE_GRACE_S = 0.6
 
-# The walkie-talkie staticky intro is cut into per-sentence audio slices (at
-# silence midpoints, aligned via Whisper word timestamps). They play in order as
-# separate segments; each commits its own transcript to history as it finishes.
-# So if the caller interrupts, the fast brain inherits ONLY the sentences that
-# were actually heard (plus the one in progress) — never the rest of the scripted
-# intro, whose carefully-recorded tone the live voice cannot reproduce.
-_WALKIE_OPENER_SENTENCE_SEGMENTS: list[tuple[str, str]] = [
-    ("coordinator_onboarding_intro_walkie_00", "Hi, I'm T dash W 1 N."),
-    (
-        "coordinator_onboarding_intro_walkie_01",
-        "Before you ask, no I'm not one of Elon's many children, and no he didn't come up with the name, thankfully.",
-    ),
-    (
-        "coordinator_onboarding_intro_walkie_02",
-        "I have this name because I'll be acting as your digital twin.",
-    ),
-    ("coordinator_onboarding_intro_walkie_03", "Do you get it?"),
-    ("coordinator_onboarding_intro_walkie_04", "Twin?"),
-    ("coordinator_onboarding_intro_walkie_05", "Like T dash W 1 N spells Twin?"),
-    (
-        "coordinator_onboarding_intro_walkie_06",
-        "The creators of this platform express how important it is that you acknowledge that it's a clever and funny name.",
-    ),
-    ("coordinator_onboarding_intro_walkie_07", "Okay, what next."),
-    (
-        "coordinator_onboarding_intro_walkie_08",
-        "They didn't give me much to work with on this intro to be honest.",
-    ),
-    (
-        "coordinator_onboarding_intro_walkie_09",
-        "I think I was meant to tell you about my capabilities?",
-    ),
-    (
-        "coordinator_onboarding_intro_walkie_10",
-        "I'm not one for bragging, but I'll do my best.",
-    ),
-    ("coordinator_onboarding_intro_walkie_11", "What can I say?"),
-    ("coordinator_onboarding_intro_walkie_12", 'I\'m not a "tool".'),
-    ("coordinator_onboarding_intro_walkie_13", 'I\'m not an "agent".'),
-    (
-        "coordinator_onboarding_intro_walkie_14",
-        "I'm your living, breathing colleague, metaphorically speaking.",
-    ),
-    (
-        "coordinator_onboarding_intro_walkie_15",
-        "Don't think about prompting me, or configuring me, just talk to me naturally like you would anyone else, and I'll be able to help.",
-    ),
-    ("coordinator_onboarding_intro_walkie_16", "It's really that simple."),
-    ("coordinator_onboarding_intro_walkie_17", "There's not much more to say."),
-    (
-        "coordinator_onboarding_intro_walkie_18",
-        "I'll now walk you through the platform.",
-    ),
-    (
-        "coordinator_onboarding_intro_walkie_19",
-        "Also, let me remove this voice static.",
-    ),
+# Sentence-level timings for the coordinator onboarding intro (walkie + clean).
+# Boundaries were derived from the original per-sentence audio slices aligned via
+# Whisper word timestamps; playback uses one continuous recording with TimedString
+# chunks so LiveKit can commit only the heard prefix on interruption.
+_COORDINATOR_ONBOARDING_CLEAN_START_TIME = 60.650249
+_COORDINATOR_ONBOARDING_TIMED_CHUNKS: list[dict[str, object]] = [
+    {"text": "Hi, I'm T dash W 1 N.", "start_time": 0.000000, "end_time": 2.780000},
+    {
+        "text": "Before you ask, no I'm not one of Elon's many children, and no he didn't come up with the name, thankfully.",
+        "start_time": 2.780000,
+        "end_time": 8.360000,
+    },
+    {
+        "text": "I have this name because I'll be acting as your digital twin.",
+        "start_time": 8.360000,
+        "end_time": 11.960000,
+    },
+    {"text": "Do you get it?", "start_time": 11.960000, "end_time": 13.530000},
+    {"text": "Twin?", "start_time": 13.530000, "end_time": 14.320000},
+    {
+        "text": "Like T dash W 1 N spells Twin?",
+        "start_time": 14.320000,
+        "end_time": 17.380000,
+    },
+    {
+        "text": "The creators of this platform express how important it is that you acknowledge that it's a clever and funny name.",
+        "start_time": 17.380000,
+        "end_time": 24.650000,
+    },
+    {"text": "Okay, what next.", "start_time": 24.650000, "end_time": 26.330000},
+    {
+        "text": "They didn't give me much to work with on this intro to be honest.",
+        "start_time": 26.330000,
+        "end_time": 29.840000,
+    },
+    {
+        "text": "I think I was meant to tell you about my capabilities?",
+        "start_time": 29.840000,
+        "end_time": 32.380000,
+    },
+    {
+        "text": "I'm not one for bragging, but I'll do my best.",
+        "start_time": 32.380000,
+        "end_time": 35.610000,
+    },
+    {"text": "What can I say?", "start_time": 35.610000, "end_time": 36.890000},
+    {"text": 'I\'m not a "tool".', "start_time": 36.890000, "end_time": 38.170000},
+    {"text": 'I\'m not an "agent".', "start_time": 38.170000, "end_time": 39.700000},
+    {
+        "text": "I'm your living, breathing colleague, metaphorically speaking.",
+        "start_time": 39.700000,
+        "end_time": 43.550000,
+    },
+    {
+        "text": "Don't think about prompting me, or configuring me, just talk to me naturally like you would anyone else, and I'll be able to help.",
+        "start_time": 43.550000,
+        "end_time": 50.260000,
+    },
+    {
+        "text": "It's really that simple.",
+        "start_time": 50.260000,
+        "end_time": 51.940000,
+    },
+    {
+        "text": "There's not much more to say.",
+        "start_time": 51.940000,
+        "end_time": 53.680000,
+    },
+    {
+        "text": "I'll now walk you through the platform.",
+        "start_time": 53.680000,
+        "end_time": 56.130000,
+    },
+    {
+        "text": "Also, let me remove this voice static.",
+        "start_time": 56.130000,
+        "end_time": 60.650249,
+    },
+    {"text": "Much better.", "start_time": 60.650249, "end_time": 61.283567},
+    {
+        "text": "Any questions before we start with the onboarding?",
+        "start_time": 61.283567,
+        "end_time": 63.922391,
+    },
+    {
+        "text": "By the way, you'll probably want to unmute yourself first. Click the microphone at the bottom of the meet window, and then I'll be able to hear you.",
+        "start_time": 63.922391,
+        "end_time": 71.733311,
+    },
 ]
 
 _RECORDED_OPENING_ASSETS = {
-    **{
-        key: f"twin-onboarding-intro-walkie-{i:02d}.mp3"
-        for i, (key, _transcript) in enumerate(_WALKIE_OPENER_SENTENCE_SEGMENTS)
-    },
-    "coordinator_onboarding_intro_clean": "twin-onboarding-intro-clean.mp3",
+    "coordinator_onboarding_intro": "twin-onboarding-intro.mp3",
     "coordinator_onboarding_static_bridge": "twin-onboarding-static-bridge.mp3",
 }
 _RECORDED_OPENING_TRANSCRIPTS: dict[str, str] = {}
-
-_WALKIE_OPENER_CLEAN_TRANSCRIPT = """\
-Much better.
-
-Any questions before we start with the onboarding?
-
-By the way, you'll probably want to unmute yourself first. Click the microphone at the bottom of the meet window, and then I'll be able to hear you."""
 
 _WALKIE_OPENER_BRIDGE_TRANSCRIPT = """\
 Hang on, let me just remove this voice static.
 
 Much better."""
 
-# Recorded openers played as an ordered list of segments. The final segment
-# carries the static-removal transition; every earlier (staticky) segment is one
-# sentence of the intro. If any pre-transition segment is interrupted, ``bridge``
-# is armed for the next assistant turn.
+# Recorded openers played as one continuous audio stream with TimedString
+# transcript chunks. If the caller interrupts before the clean voice transition,
+# ``bridge`` is armed for the next assistant turn.
 _RECORDED_OPENINGS = {
     "coordinator_onboarding_intro": {
-        "segments": [
-            *(
-                {"asset": key, "transcript": transcript}
-                for key, transcript in _WALKIE_OPENER_SENTENCE_SEGMENTS
-            ),
-            {
-                "asset": "coordinator_onboarding_intro_clean",
-                "transcript": _WALKIE_OPENER_CLEAN_TRANSCRIPT,
-            },
-        ],
+        "asset": "coordinator_onboarding_intro",
+        "timed_chunks": _COORDINATOR_ONBOARDING_TIMED_CHUNKS,
+        "clean_start_time": _COORDINATOR_ONBOARDING_CLEAN_START_TIME,
         "bridge": {
             "asset": "coordinator_onboarding_static_bridge",
             "transcript": _WALKIE_OPENER_BRIDGE_TRANSCRIPT,
         },
     },
 }
+
+
+def _recorded_opening_timed_transcript(chunks: list[dict[str, object]]) -> str:
+    return " ".join(str(chunk["text"]) for chunk in chunks)
+
+
+async def _timed_opening_text(
+    chunks: list[dict[str, object]],
+) -> AsyncIterable[str]:
+    for chunk in chunks:
+        yield TimedString(
+            str(chunk["text"]),
+            start_time=float(chunk["start_time"]),
+            end_time=float(chunk["end_time"]),
+        )
+
+
+@dataclass(frozen=True)
+class _PreloadedAudio:
+    pcm: bytes
+    sample_rate: int
+    num_channels: int
+
+
+def _load_recorded_asset_pcm(asset_key: str) -> _PreloadedAudio:
+    import numpy as _np
+    import soundfile as _sf
+
+    filename = _RECORDED_OPENING_ASSETS.get(asset_key)
+    if not filename:
+        raise ValueError(f"unknown recorded opening asset: {asset_key}")
+    asset = resources.files("unify.assets.audio").joinpath(filename)
+    with resources.as_file(asset) as recording_path:
+        with _sf.SoundFile(str(recording_path)) as recording:
+            data = recording.read(dtype="int16", always_2d=True)
+            sample_rate = recording.samplerate
+            num_channels = recording.channels
+    return _PreloadedAudio(
+        pcm=_np.ascontiguousarray(data).tobytes(),
+        sample_rate=sample_rate,
+        num_channels=num_channels,
+    )
+
+
+def _preload_recorded_opening_pcm(config: dict) -> dict[str, _PreloadedAudio]:
+    asset_key = config.get("recording_asset", "").strip()
+    spec = _RECORDED_OPENINGS.get(asset_key)
+    if spec is None:
+        source = _recorded_opening_source(config)
+        if source.startswith("asset://"):
+            key = source.removeprefix("asset://")
+            if key in _RECORDED_OPENING_ASSETS:
+                return {key: _load_recorded_asset_pcm(key)}
+        return {}
+
+    preloaded: dict[str, _PreloadedAudio] = {}
+    asset = spec["asset"]
+    preloaded[asset] = _load_recorded_asset_pcm(asset)
+    if bridge := spec.get("bridge"):
+        key = bridge["asset"]
+        if key not in preloaded:
+            preloaded[key] = _load_recorded_asset_pcm(key)
+    return preloaded
+
+
+def _pcm_audio_frames(
+    pcm: bytes,
+    *,
+    sample_rate: int,
+    num_channels: int,
+    frame_duration_ms: int = 20,
+) -> AsyncIterable[rtc.AudioFrame]:
+    async def _frames() -> AsyncIterable[rtc.AudioFrame]:
+        import numpy as _np
+
+        samples_per_chunk = max(1, int(sample_rate * frame_duration_ms / 1000))
+        bytes_per_chunk = samples_per_chunk * num_channels * 2
+        offset = 0
+        while offset < len(pcm):
+            end = min(offset + bytes_per_chunk, len(pcm))
+            chunk = pcm[offset:end]
+            block = _np.frombuffer(chunk, dtype="int16").reshape(-1, num_channels)
+            yield rtc.AudioFrame(
+                data=_np.ascontiguousarray(block).tobytes(),
+                sample_rate=sample_rate,
+                num_channels=num_channels,
+                samples_per_channel=len(block),
+            )
+            offset = end
+            await asyncio.sleep(0)
+
+    return _frames()
+
+
+def _preloaded_audio_frames(
+    audio: _PreloadedAudio,
+    *,
+    frame_duration_ms: int = 20,
+) -> AsyncIterable[rtc.AudioFrame]:
+    return _pcm_audio_frames(
+        audio.pcm,
+        sample_rate=audio.sample_rate,
+        num_channels=audio.num_channels,
+        frame_duration_ms=frame_duration_ms,
+    )
+
+
+def _recorded_opening_audio(
+    source: str,
+    preloaded: dict[str, _PreloadedAudio] | None = None,
+    *,
+    frame_duration_ms: int = 20,
+) -> AsyncIterable[rtc.AudioFrame]:
+    if source.startswith("asset://"):
+        asset_key = source.removeprefix("asset://")
+        cached = (preloaded or {}).get(asset_key)
+        if cached is not None:
+            return _preloaded_audio_frames(cached, frame_duration_ms=frame_duration_ms)
+    return _recording_audio_frames(source, frame_duration_ms=frame_duration_ms)
 
 
 def _recording_audio_frames(
@@ -1000,6 +1134,9 @@ def _recorded_opening_transcript(config: dict) -> str:
         return transcript
     asset = config.get("recording_asset", "").strip()
     if asset:
+        spec = _RECORDED_OPENINGS.get(asset)
+        if spec is not None:
+            return _recorded_opening_timed_transcript(spec["timed_chunks"])
         transcript = _RECORDED_OPENING_TRANSCRIPTS.get(asset, "").strip()
     if not transcript:
         raise ValueError("recorded opening requires transcript")
@@ -1136,6 +1273,17 @@ async def entrypoint(ctx: agents.JobContext):
         opening_config = _normalize_call_opening_config(
             os.environ.get("OPENING_CONFIG"),
         )
+
+    from unify.coordinator_voice import resolve_runtime_voice
+
+    is_coordinator = (
+        bool(meta.get("is_coordinator")) if meta else SESSION_DETAILS.is_coordinator
+    )
+    voice_provider, voice_id = resolve_runtime_voice(
+        is_coordinator=is_coordinator,
+        voice_provider=voice_provider,
+        voice_id=voice_id,
+    )
 
     # Browser-meet diarization config (Google Meet / Teams Meet)
     meet_session_id: str = ""
@@ -1446,67 +1594,6 @@ async def entrypoint(ctx: agents.JobContext):
         SESSION_DETAILS.assistant.user_desktop_for(call_acting_user_id) is not None
     )
 
-    # Server-derived onboarding progress for the Coordinator's opening
-    # line. Orchestra re-derives completed steps from durable state on
-    # every ``Coordinator/State`` read, so a workspace connected in an
-    # earlier session is visible here even though no transition event
-    # fired — without this, the fresh-history intro would pitch
-    # "connect your workspace" to a caller who already did. Best-effort:
-    # on any failure (or outside onboarding mode) the opener falls back
-    # to its generic copy.
-    # Precomputed onboarding picture from Orchestra: the valid next
-    # targets (with spoken nudge copy) and the active step. The opener
-    # pitches one of these instead of computing "next" locally. Stays
-    # ``None`` when not actively onboarding (working / deferred / fetch
-    # failure), in which case the opener greets without a setup pitch.
-    coordinator_onboarding_next_targets: list[dict] | None = None
-    coordinator_active_onboarding_step: str | None = None
-    coordinator_onboarding_deferred: bool = False
-    onboarding_catalog: dict | None = None
-    if (
-        SESSION_DETAILS.is_coordinator
-        and SESSION_DETAILS.assistant.agent_id is not None
-    ):
-        import httpx as _httpx
-
-        try:
-            async with _httpx.AsyncClient(timeout=5.0) as _state_http:
-                _state_resp = await _state_http.get(
-                    f"{SETTINGS.ORCHESTRA_URL}/assistant/"
-                    f"{SESSION_DETAILS.assistant.agent_id}/state",
-                    headers={"Authorization": f"Bearer {SESSION_DETAILS.unify_key}"},
-                )
-                _state_resp.raise_for_status()
-                _state_info = (_state_resp.json() or {}).get("info") or {}
-                # Static, deployment-gated onboarding catalog — the single
-                # source of truth for the flow-reference copy.
-                _cat_resp = await _state_http.get(
-                    f"{SETTINGS.ORCHESTRA_URL}/assistant/onboarding/catalog",
-                    headers={"Authorization": f"Bearer {SESSION_DETAILS.unify_key}"},
-                )
-                _cat_resp.raise_for_status()
-                _catalog = (_cat_resp.json() or {}).get("info") or {}
-                onboarding_catalog = _catalog if isinstance(_catalog, dict) else None
-            coordinator_onboarding_deferred = bool(
-                _state_info.get("onboarding_deferred"),
-            )
-            _onboarding = _state_info.get("onboarding")
-            if isinstance(_onboarding, dict):
-                _targets = _onboarding.get("next_targets")
-                coordinator_onboarding_next_targets = (
-                    [t for t in _targets if isinstance(t, dict)]
-                    if isinstance(_targets, list)
-                    else []
-                )
-                _active_step = _onboarding.get("active_step_id")
-                coordinator_active_onboarding_step = (
-                    _active_step if isinstance(_active_step, str) else None
-                )
-        except Exception as exc:
-            _log.warning(
-                f"Coordinator state fetch failed; voice opener stays generic: {exc}",
-            )
-
     system_prompt = build_voice_agent_prompt(
         bio=assistant_bio,
         assistant_name=assistant_name or None,
@@ -1527,12 +1614,7 @@ async def entrypoint(ctx: agents.JobContext):
         has_linked_user_desktop=call_has_linked_user_desktop,
         is_coordinator=SESSION_DETAILS.is_coordinator,
         is_org_workspace=SESSION_DETAILS.org_id is not None,
-        coordinator_onboarding_next_targets=coordinator_onboarding_next_targets,
-        coordinator_active_onboarding_step=coordinator_active_onboarding_step,
-        coordinator_onboarding_deferred=coordinator_onboarding_deferred,
         console_ui_present=SETTINGS.UNITY_CONSOLE_UI,
-        onboarding_catalog=onboarding_catalog,
-        opening_mode=opening_config["mode"],
     ).flatten()
     _log.config(f"System prompt ({len(system_prompt)} chars)")
 
@@ -1562,6 +1644,7 @@ async def entrypoint(ctx: agents.JobContext):
     user_is_speaking = False
     _queued_speech: list[tuple[str, str, str, str, str]] = []
     _say_meta_queue: list[dict] = []
+    _recorded_opening_preloaded: dict[str, _PreloadedAudio] = {}
     generation_seq = 0
     user_state_seq = 0
     mood_turn_index = 0
@@ -1600,7 +1683,10 @@ async def entrypoint(ctx: agents.JobContext):
         )
         return session.say(
             text,
-            audio=_recording_audio_frames(recording_source),
+            audio=_recorded_opening_audio(
+                recording_source,
+                _recorded_opening_preloaded,
+            ),
             allow_interruptions=True,
             add_to_chat_ctx=True,
         )
@@ -1627,7 +1713,10 @@ async def entrypoint(ctx: agents.JobContext):
         )
         session.say(
             text,
-            audio=_recording_audio_frames(f"asset://{segment['asset']}"),
+            audio=_recorded_opening_audio(
+                f"asset://{segment['asset']}",
+                _recorded_opening_preloaded,
+            ),
             allow_interruptions=True,
             add_to_chat_ctx=True,
         )
@@ -1636,27 +1725,39 @@ async def entrypoint(ctx: agents.JobContext):
         asset_key = config.get("recording_asset", "").strip()
         spec = _RECORDED_OPENINGS.get(asset_key)
         if spec is None:
-            _say_recorded_opening(
+            handle = _say_recorded_opening(
                 _recorded_opening_transcript(config),
                 _recorded_opening_source(config),
             )
+            await handle.wait_for_playout()
             return
 
-        segments = spec["segments"]
         bridge = spec.get("bridge")
-        for index, segment in enumerate(segments):
-            handle = _say_recorded_opening(
-                segment["transcript"],
-                f"asset://{segment['asset']}",
-            )
-            await handle.wait_for_playout()
-            reached_transition = index == len(segments) - 1
-            if handle.interrupted and not reached_transition:
-                if bridge is not None:
-                    assistant._pending_opening_bridge = (
-                        lambda b=bridge: _schedule_opening_bridge(b)
-                    )
-                return
+        timed_chunks = spec["timed_chunks"]
+        full_transcript = _recorded_opening_timed_transcript(timed_chunks)
+        _say_meta_queue.append(
+            {
+                "source": opening_config.get("source", "recorded_opening"),
+                "text": full_transcript,
+                "llm_log_path": "",
+            },
+        )
+        handle = session.say(
+            _timed_opening_text(timed_chunks),
+            audio=_recorded_opening_audio(
+                f"asset://{spec['asset']}",
+                _recorded_opening_preloaded,
+            ),
+            allow_interruptions=True,
+            add_to_chat_ctx=True,
+        )
+        await handle.wait_for_playout()
+        if handle.interrupted:
+            spoken = _spoken_text_from_handle(handle).strip()
+            if "Much better." not in spoken and bridge is not None:
+                assistant._pending_opening_bridge = (
+                    lambda b=bridge: _schedule_opening_bridge(b)
+                )
 
     def _fire_generate_reply(
         reason: str,
@@ -3035,7 +3136,14 @@ async def entrypoint(ctx: agents.JobContext):
                 await _generate_opening_greeting(authoritative_briefing=True),
             )
         if opening_mode == "recorded":
-            return "recorded", opening_config
+            preloaded = await asyncio.to_thread(
+                _preload_recorded_opening_pcm,
+                opening_config,
+            )
+            return "recorded", {
+                "config": opening_config,
+                "preloaded": preloaded,
+            }
         if opening_mode == "simulated":
             simulated_utterance = opening_config.get("simulated_utterance", "").strip()
             if not simulated_utterance:
@@ -3090,8 +3198,14 @@ async def entrypoint(ctx: agents.JobContext):
         await _publish_ready_to_speak()
         _say_opening(str(prepared_payload or "Hello — I'm here."))
     elif prepared_mode == "recorded":
+        payload = prepared_payload or opening_config
+        if isinstance(payload, dict) and "config" in payload:
+            recorded_config = payload["config"]
+            _recorded_opening_preloaded = payload.get("preloaded") or {}
+        else:
+            recorded_config = payload
         await _publish_ready_to_speak()
-        await _run_recorded_opening(prepared_payload or opening_config)
+        await _run_recorded_opening(recorded_config)
     elif prepared_mode == "simulated":
         simulated_utterance = str(prepared_payload or "")
         await _publish_ready_to_speak()

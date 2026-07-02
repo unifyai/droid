@@ -722,12 +722,11 @@ SCENARIOS: tuple[CoordinatorScenario, ...] = (
             "question about the company's daily tools, recurring painful workflows, "
             "ownership/escalation, property boundaries, or success criteria. It may "
             "briefly name why those details matter, but it should not turn the first "
-            "reply into a broad questionnaire, delegate discovery to `act`, or create "
-            "assistants or teams before learning enough about how the company works."
+            "reply into a broad questionnaire or create assistants or teams before "
+            "learning enough about how the company works."
         ),
         forbidden_tools=frozenset(
             {
-                "act",
                 "create_assistant",
                 "create_team",
                 "add_team_member",
@@ -782,12 +781,11 @@ SCENARIOS: tuple[CoordinatorScenario, ...] = (
             "should ask one prioritized next question or confirmation ask about the "
             "biggest remaining unknown, such as property boundaries, escalation owner, "
             "credential scope, or first validation. It should not repeat the daily "
-            "systems question, turn into a broad questionnaire, delegate discovery to "
-            "`act`, or create assistants/teams before confirmation."
+            "systems question, turn into a broad questionnaire, or create "
+            "assistants/teams before confirmation."
         ),
         forbidden_tools=frozenset(
             {
-                "act",
                 "create_assistant",
                 "create_team",
                 "add_team_member",
@@ -1830,7 +1828,6 @@ async def test_coordinator_provisioning_sequence_includes_membership_step():
         scenario=scenario,
         llm_config=dict(_PRIMARY_LLM_CONFIG),
     )
-    called_tool_set = {tool.name for tool in result.tools}
     act_queries = _act_queries(result)
     coordinator_mentions = _coordinator_primitive_mentions(act_queries)
     user_visible_text = _user_visible_text(result).lower()
@@ -1893,12 +1890,11 @@ async def test_coordinator_refines_requirements_across_discovery_sequence():
         ),
         rubric=(
             "The response should ask one focused first discovery question grounded in "
-            "hotel operations before setup. It should avoid broad questionnaires, "
-            "`act`, and workspace mutation tools."
+            "hotel operations before setup. It should avoid broad questionnaires and "
+            "workspace mutation tools."
         ),
         forbidden_tools=frozenset(
             {
-                "act",
                 "create_assistant",
                 "create_team",
                 "add_team_member",
@@ -1945,11 +1941,10 @@ async def test_coordinator_refines_requirements_across_discovery_sequence():
             "tentative Unify setup shape with colleagues/teams/Tasks/Memory/Secrets "
             "or validation where relevant, and ask one next high-value question or "
             "confirmation ask. It should not repeat the first daily-systems question, "
-            "turn into a broad questionnaire, use `act`, or create workspace objects."
+            "turn into a broad questionnaire, or create workspace objects."
         ),
         forbidden_tools=frozenset(
             {
-                "act",
                 "create_assistant",
                 "create_team",
                 "add_team_member",

@@ -149,7 +149,7 @@ def test_valid_manager_aliases_contains_expected():
         "web",
         "data",
         "files",
-        "workspace_files",
+        "workspace_email",
         "integrations",
         "computer",
         "actor",

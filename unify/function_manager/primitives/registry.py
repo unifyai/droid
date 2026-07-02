@@ -259,39 +259,6 @@ _MANAGER_SPECS: tuple[ManagerSpec, ...] = (
         ),
     ),
     ManagerSpec(
-        manager_alias="workspace_files",
-        manager_registry_key="",
-        primitive_class_path=(
-            "unify.workspace_files.workspace_files_manager.WorkspaceFilesManager"
-        ),
-        excluded_methods=frozenset(),
-        priority=7,
-        domain="Connected Workspace Files (Drive / SharePoint / OneDrive)",
-        description=(
-            "Read files and folders in the assistant's connected Google "
-            "Workspace or Microsoft 365 account. Access is gated by a "
-            "per-assistant allowlist: items outside it are invisible (absent "
-            "from listings/search and not-found on direct access)."
-        ),
-        use_when=(
-            "The user asks to find, open, read, or search documents in their "
-            "connected Google Drive / Shared Drives or OneDrive / SharePoint "
-            "libraries"
-        ),
-        examples=(
-            "'List the files in the Finance folder on Drive', "
-            "'Find the Q3 report in SharePoint', 'Read the contract PDF'"
-        ),
-        special_note=(
-            "This is the ONLY sanctioned path to connected-account files. Do "
-            "not attempt raw Drive/Graph SDK or HTTP calls for workspace files "
-            "-- the file-scoped token is not available in the sandbox and the "
-            "allowlist is enforced here. Start from `list_roots`, then "
-            "`list_children` to navigate; results already reflect what the "
-            "user has permitted."
-        ),
-    ),
-    ManagerSpec(
         manager_alias="workspace_email",
         manager_registry_key="",
         primitive_class_path=(

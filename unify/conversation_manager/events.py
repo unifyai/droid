@@ -1646,7 +1646,7 @@ class CoordinatorOnboardingEvent(Event):
     Coordinator's onboarding conversation.
 
     Emitted only while the Coordinator is in
-    ``Coordinator/State.mode == 'onboarding'`` (see
+    ``Coordinator/State.onboarding_active`` (see
     ``coordinator_onboarding_event_service`` in orchestra) so day-to-day
     activity stays silent. Subtypes correspond to onboarding milestones
     with no other user-visible feedback channel: workspace OAuth landed,

@@ -397,6 +397,8 @@ class _VenvConnection:
         python_path = await function_manager.prepare_venv(venv_id=venv_id)
         runner_path = function_manager._get_venv_runner_path(venv_id)
 
+        from unify.provider_proxy.session import build_sandbox_env
+
         use_process_group = sys.platform != "win32"
         process = await asyncio.create_subprocess_exec(
             str(python_path),
@@ -406,6 +408,7 @@ class _VenvConnection:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=use_process_group,
+            env=build_sandbox_env(),
         )
 
         conn = cls(process, venv_id, function_manager)
@@ -6066,6 +6069,8 @@ class FunctionManager(BaseFunctionManager):
                 f"  ancestor existence (deepest first): {ancestor_status}",
             )
 
+        from unify.provider_proxy.session import build_sandbox_env
+
         process = await asyncio.create_subprocess_exec(
             str(python_path),
             str(runner_path),
@@ -6073,6 +6078,7 @@ class FunctionManager(BaseFunctionManager):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=use_process_group,
+            env=build_sandbox_env(),
         )
 
         # Send initial execution request
@@ -7226,8 +7232,11 @@ if __name__ == "__main__":
             # Get the path to unity-primitive CLI
             shell_runner_path = Path(__file__).parent / "shell_runner.py"
 
-            # Build environment for the subprocess
-            script_env = os.environ.copy()
+            # Build environment for the subprocess (sanitized: no raw provider
+            # tokens, plus localhost proxy endpoints).
+            from unify.provider_proxy.session import build_sandbox_env
+
+            script_env = build_sandbox_env()
             script_env["UNITY_RPC_SOCKET"] = str(socket_path)
             # Add the shell_runner.py as unity-primitive command
             # We create a wrapper script that invokes python with shell_runner.py

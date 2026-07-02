@@ -6,19 +6,22 @@ secrets from Orchestra into the local ``Secrets`` context, ``.env``, and
 values: provider aliases, access-token/expiry secret names, freshness checks,
 and the sandbox helper exposed to actor-written Python.
 
-The split is deliberate.  ``get_oauth_access_token(...)`` is not a
-``primitives.secrets`` tool and does not expose arbitrary secrets; it behaves
-like ``query_llm(...)``/``notify(...)`` as a Python runtime helper for code paths
-that must pass an explicit OAuth access token to an SDK/client/request.  Code
-that can rely on provider SDK/default environment credential behavior should
-continue to do so; env overlays below keep rotating OAuth env vars fresh for
-venv and shell backends.
+The split is deliberate and security-relevant. ``get_provider_access_token(...)``
+returns the REAL bearer token and is TRUSTED-RUNTIME ONLY (the localhost
+provider proxy and first-party managers). The sandbox-facing
+``get_oauth_access_token(...)`` never returns a real token: it returns a local
+capability handle (the proxy nonce) to use against the localhost proxy base
+URLs. Raw provider tokens are kept out of ``os.environ``/``.env`` and the
+``Secrets`` context so that neither subprocess nor in-process actor code can read
+them and bypass the file-access allowlist; connected-provider REST is reached
+only through the proxy, which injects the real token and enforces the allowlist.
 """
 
 import inspect
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,20 @@ def refresh_token_oauth_secret_names() -> frozenset[str]:
     return frozenset(names)
 
 
+def refresh_token_oauth_token_names() -> frozenset[str]:
+    """Return only the raw access/refresh token secret names (sensitive subset).
+
+    These must never be mirrored to the Secrets context, ``.env`` or
+    ``os.environ``; they are held in SecretManager's in-memory OAuth store.
+    """
+    names: set[str] = set()
+    for metadata in _OAUTH_PROVIDER_METADATA.values():
+        names.add(metadata.access_token_secret)
+        if metadata.refresh_token_secret:
+            names.add(metadata.refresh_token_secret)
+    return frozenset(names)
+
+
 def _get_secret_manager():
     from unify.manager_registry import ManagerRegistry
 
@@ -144,49 +161,37 @@ def _token_expires_within(
     return remaining <= min_ttl_seconds
 
 
-def get_oauth_access_token(provider: str, *, min_ttl_seconds: int = 300) -> str:
+def _read_access_token(secret_manager: Any, name: str) -> str | None:
+    """Read a real access token, preferring the in-memory OAuth store.
+
+    Raw provider tokens are deliberately kept out of the ``Secrets`` context,
+    ``.env`` and ``os.environ`` so sandboxed actor code cannot read them. They
+    live only in SecretManager's in-memory OAuth store; fall back to the legacy
+    secret lookup for environments/tests that still populate it.
     """
-    Return a current OAuth access token for a refresh-token backed provider.
+    getter = getattr(secret_manager, "get_oauth_token", None)
+    if callable(getter):
+        value = getter(name)
+        if isinstance(value, str) and value:
+            return value
+    return _get_secret_value(secret_manager, name)
 
-    Use this runtime helper inside generated Python code when a provider SDK,
-    client, or direct HTTP request requires an explicit access token. Prefer
-    provider SDK/default credential behavior when it can read credentials from
-    the runtime environment directly; Unity keeps rotating OAuth env vars
-    synced separately for that path.
 
-    Parameters
-    ----------
-    provider:
-        Provider name or alias. Built-in aliases include ``"microsoft"``,
-        ``"graph"``, ``"google"``, ``"gmail"``, and ``"drive"``.
-    min_ttl_seconds:
-        Minimum acceptable token lifetime. If the current token is missing or
-        expires within this many seconds, the parent runtime forces an
-        assistant-secret sync from Orchestra before returning a token.
+def get_provider_access_token(provider: str, *, min_ttl_seconds: int = 300) -> str:
+    """Return a current REAL OAuth access token for a refresh-token provider.
 
-    Examples
-    --------
-    Multiple providers can be used in one sandbox; request each explicitly::
+    TRUSTED-RUNTIME ONLY. This returns the actual bearer token and must never be
+    exposed to the ``execute_code`` sandbox. It is used by the localhost
+    provider proxy and by first-party managers (e.g. workspace email) that run
+    in the trusted parent process. Sandboxed code uses
+    :func:`get_oauth_access_token`, which returns a local capability handle.
 
-        microsoft_token = get_oauth_access_token("microsoft")
-        google_token = get_oauth_access_token("google")
-
-    For direct OAuth2 HTTP APIs such as Microsoft Graph, provider docs commonly
-    show the access token in an ``Authorization: Bearer ...`` header. Other SDKs
-    may require a credential object or may read environment variables directly,
-    so follow the provider's SDK/API docs for how to apply the token.
-
-    Anti-patterns
-    -------------
-    - Do not print, log, return, or store the token value.
-    - Do not save concrete token values in FunctionManager functions or
-      GuidanceManager guidance.
-    - Do not read rotating OAuth access-token env vars directly when this
-      helper is available and an explicit access token is required.
+    If the current token is missing or expires within ``min_ttl_seconds``, an
+    assistant-secret sync from Orchestra is forced before returning a token.
     """
     metadata = _resolve_oauth_provider(provider)
     secret_manager = _get_secret_manager()
-    token = _get_secret_value(secret_manager, metadata.access_token_secret)
+    token = _read_access_token(secret_manager, metadata.access_token_secret)
     needs_force_sync = token is None or _token_expires_within(
         secret_manager,
         metadata,
@@ -197,7 +202,7 @@ def get_oauth_access_token(provider: str, *, min_ttl_seconds: int = 300) -> str:
         force=needs_force_sync,
         reason=f"oauth_access_token:{metadata.canonical_name}",
     )
-    token = _get_secret_value(secret_manager, metadata.access_token_secret)
+    token = _read_access_token(secret_manager, metadata.access_token_secret)
     if not token:
         raise ValueError(
             f"No access token is available for refresh-token OAuth provider "
@@ -211,26 +216,107 @@ def get_oauth_access_token(provider: str, *, min_ttl_seconds: int = 300) -> str:
     return token
 
 
-def get_refresh_token_oauth_env_overlay() -> dict[str, str]:
-    """Return fresh rotating OAuth env vars for subprocess execution backends.
+def get_provider_access_token_optimistic(provider: str) -> str | None:
+    """Return the current access token WITHOUT a pre-emptive expiry gate.
 
-    Venv and persistent shell sessions can outlive the parent process's last
-    environment update, so they cannot rely solely on the environment copied at
-    process start.  This helper performs the debounced assistant-secret sync,
-    then returns only the built-in refresh-token OAuth variables that should be
-    overlaid into those subprocesses before execution.
+    TRUSTED-RUNTIME ONLY. Unlike :func:`get_provider_access_token`, this does not
+    refuse a token whose stored ``*_TOKEN_EXPIRES_AT`` looks stale/missing: it
+    trusts the provider to reject a genuinely-expired token (the proxy then
+    forces a refresh and retries once). This avoids blocking valid tokens on
+    stale expiry metadata. Performs a debounced sync (forced only when no token
+    is cached). Returns None if no token is available.
     """
+    metadata = _resolve_oauth_provider(provider)
     secret_manager = _get_secret_manager()
+    token = _read_access_token(secret_manager, metadata.access_token_secret)
     secret_manager.sync_assistant_secrets_if_stale(
         ttl_seconds=60.0,
-        reason="oauth_env_overlay",
+        force=token is None,
+        reason=f"oauth_optimistic:{metadata.canonical_name}",
     )
-    overlay: dict[str, str] = {}
-    for name in refresh_token_oauth_secret_names():
-        value = _get_secret_value(secret_manager, name)
-        if value:
-            overlay[name] = value
-    return overlay
+    return _read_access_token(secret_manager, metadata.access_token_secret)
+
+
+def refresh_provider_access_token(provider: str) -> str | None:
+    """Force a secret sync from Orchestra and return the freshest token, or None.
+
+    TRUSTED-RUNTIME ONLY. Used by the proxy after the provider rejects a token
+    with 401. This pulls whatever the platform refresh job has persisted to
+    Orchestra; it does not itself call the provider's token endpoint, so it only
+    recovers when Orchestra already holds a newer token (e.g. the 30-minute
+    refresh cron has run). If it still returns a stale token, the proxy surfaces
+    a clean "reconnect account" 401.
+    """
+    metadata = _resolve_oauth_provider(provider)
+    secret_manager = _get_secret_manager()
+    secret_manager.sync_assistant_secrets_if_stale(
+        ttl_seconds=0.0,
+        force=True,
+        reason=f"oauth_refresh_on_401:{metadata.canonical_name}",
+    )
+    return _read_access_token(secret_manager, metadata.access_token_secret)
+
+
+def get_oauth_access_token(provider: str, *, min_ttl_seconds: int = 300) -> str:
+    """
+    Authorize provider REST calls from ``execute_code`` via the local proxy.
+
+    This does NOT return a raw provider access token. It returns a local
+    capability handle (the workspace proxy nonce) to place in the
+    ``Authorization: Bearer ...`` header. You must ALSO point your base URL at
+    the local proxy so the request is authorized and policy-enforced:
+
+    - Microsoft Graph: base URL ``os.environ["MICROSOFT_GRAPH_BASE"]`` (drop-in
+      for ``https://graph.microsoft.com/v1.0``).
+    - Google APIs: ``os.environ["GOOGLE_DRIVE_BASE"]`` (drop-in for
+      ``https://www.googleapis.com/drive/v3``) or ``GOOGLE_API_BASE`` for other
+      Google services.
+
+    The proxy swaps this handle for the real upstream token and enforces the
+    per-assistant file-access allowlist. Calling the provider hosts directly
+    (``graph.microsoft.com`` / ``www.googleapis.com``) with this handle will
+    fail: the sandbox holds no real token by design.
+
+    Parameters
+    ----------
+    provider:
+        Provider name or alias. Built-in aliases include ``"microsoft"``,
+        ``"graph"``, ``"google"``, ``"gmail"``, and ``"drive"``.
+    min_ttl_seconds:
+        Accepted for signature compatibility; token freshness is handled by the
+        proxy on each upstream call.
+
+    Examples
+    --------
+    Multiple providers can be used in one sandbox; request each explicitly::
+
+        microsoft_token = get_oauth_access_token("microsoft")
+        google_token = get_oauth_access_token("google")
+
+    Anti-patterns
+    -------------
+    - Do not call ``graph.microsoft.com`` / ``www.googleapis.com`` directly; use
+      the proxy base URLs above.
+    - Do not print, log, return, or store this handle.
+    """
+    _resolve_oauth_provider(provider)
+    from unify.provider_proxy.proxy import ensure_proxy_running
+
+    return ensure_proxy_running().nonce
+
+
+def get_refresh_token_oauth_env_overlay() -> dict[str, str]:
+    """Return the proxy base URLs + nonce to overlay into subprocess sandboxes.
+
+    Venv and persistent shell sessions may outlive the parent process's last
+    environment update, so each execution overlays the current workspace proxy
+    endpoints. The sandbox is never given raw OAuth tokens: connected-provider
+    REST (files and non-file) is reached through the localhost proxy, which
+    injects the real token and enforces the file-access allowlist.
+    """
+    from unify.provider_proxy.proxy import ensure_proxy_running
+
+    return dict(ensure_proxy_running().sandbox_env())
 
 
 def get_oauth_prompt_context() -> str:

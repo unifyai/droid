@@ -350,6 +350,14 @@ async def conversation_manager(request) -> CMStepDriver:
     reset_event_broker()
 
 
+def _reset_screen_share_state(cm: "CMStepDriver") -> None:
+    """Clear screen-share flags and buffered screenshots between tests."""
+
+    cm.cm.user_screen_share_active = False
+    cm.cm.assistant_screen_share_active = False
+    cm.cm._screenshot_buffer.clear()
+
+
 def _complete_in_flight_actions(cm: "CMStepDriver") -> None:
     """
     Complete all in-flight actions to unblock watcher threads.
@@ -393,6 +401,9 @@ def initialized_cm(
 
     # Clear chat history (LLM message history)
     conversation_manager.cm.chat_history.clear()
+
+    # Screen-share tests attach screenshots that must not leak into text-only turns.
+    _reset_screen_share_state(conversation_manager)
 
     # Clear tool call tracking from previous tests
     conversation_manager.all_tool_calls.clear()

@@ -263,6 +263,34 @@ class TestSendSms:
             assert payload["Body"] == "Hello from tests"
 
     @pytest.mark.asyncio
+    async def test_send_sms_collapses_hard_wrapped_body(self):
+        """Hard-wrapped SMS bodies are normalized before transport."""
+        mock_session = _mock_aiohttp_session(
+            response_json={"success": True, "sid": "SM123"},
+        )
+        wrapped = "Line one of the clue\nLine two of the clue"
+
+        with (
+            patch("aiohttp.ClientSession", return_value=mock_session),
+            patch(
+                "unify.conversation_manager.domains.comms_utils.SESSION_DETAILS",
+            ) as mock_session_details,
+            patch(
+                "unify.conversation_manager.domains.comms_utils.SETTINGS",
+            ) as mock_settings,
+        ):
+            mock_session_details.assistant.number = "+15551234567"
+            mock_settings.conversation.COMMS_URL = COMMS_URL
+
+            await comms_utils.send_sms_message_via_number(
+                to_number="+15559876543",
+                content=wrapped,
+            )
+
+            payload = mock_session.post.call_args.kwargs["json"]
+            assert payload["Body"] == "Line one of the clue Line two of the clue"
+
+    @pytest.mark.asyncio
     async def test_send_sms_no_from_number(self):
         """Returns failure when assistant has no phone number."""
         with patch(
@@ -517,6 +545,38 @@ class TestSendEmailViaAddress:
 
             posted_url = mock_session.post.call_args[0][0]
             assert posted_url == f"{COMMS_URL}/email/send"
+
+    @pytest.mark.asyncio
+    async def test_send_email_collapses_hard_wrapped_body(self):
+        """Hard-wrapped email bodies are normalized before transport."""
+        mock_session = _mock_aiohttp_session(
+            response_json={"success": True, "id": "email-789"},
+        )
+        wrapped = "First sentence of the quiz.\nSecond sentence here.\n\nClue line."
+
+        with (
+            patch("aiohttp.ClientSession", return_value=mock_session),
+            patch(
+                "unify.conversation_manager.domains.comms_utils.SESSION_DETAILS",
+            ) as mock_session_details,
+            patch(
+                "unify.conversation_manager.domains.comms_utils.SETTINGS",
+            ) as mock_settings,
+        ):
+            mock_session_details.assistant.email = "assistant@outlook.unify.ai"
+            mock_settings.conversation.COMMS_URL = COMMS_URL
+
+            await comms_utils.send_email_via_address(
+                to=["user@example.com"],
+                subject="Quiz",
+                body=wrapped,
+            )
+
+            payload = mock_session.post.call_args.kwargs["json"]
+            assert (
+                payload["body"]
+                == "First sentence of the quiz. Second sentence here.\n\nClue line."
+            )
 
 
 class TestLocalCommsBackends:

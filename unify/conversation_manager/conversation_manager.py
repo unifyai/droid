@@ -10,6 +10,7 @@ from unify.common.hierarchical_logger import DEFAULT_ICON
 from unify.common.startup_timing import log_startup_timing
 from unify.common.diagnostic_logging import staging_diagnostics_enabled
 from unify.session_details import SESSION_DETAILS
+from unify.coordinator_voice import resolve_runtime_voice
 from unify.settings import SETTINGS
 from unify.manager_registry import SingletonABCMeta
 from unify.common.async_tool_loop import SteerableToolHandle
@@ -254,13 +255,11 @@ class ConversationManager(metaclass=SingletonABCMeta):
         self.assistant_discord_bot_id = assistant_discord_bot_id
         self.assistant_slack_bot_user_id = assistant_slack_bot_user_id
         self.is_coordinator = assistant_is_coordinator
-        # Global "do onboarding later" switch, mirrored from Orchestra's
-        # ``Coordinator/State`` and refreshed on a short TTL (see
-        # ``_refresh_coordinator_onboarding_deferred``). When True the
-        # slow-brain drops all onboarding scaffolding so the Coordinator
-        # behaves as if onboarding never existed. Defaults to False until
+        # Global onboarding scaffolding gate, mirrored from Orchestra's
+        # ``Coordinator/State`` and refreshed on a short TTL. When False the
+        # slow-brain drops all onboarding scaffolding. Defaults to True until
         # the first refresh resolves.
-        self.coordinator_onboarding_deferred: bool = False
+        self.coordinator_onboarding_active: bool = True
         # Precomputed depends_on-aware onboarding picture (steps + statuses
         # + valid next targets with nudge copy), mirrored from Orchestra so
         # the slow brain reads a standing progress block instead of
@@ -2693,6 +2692,11 @@ class ConversationManager(metaclass=SingletonABCMeta):
             self.voice_provider or SESSION_DETAILS.voice.provider or "cartesia"
         )
         voice_id = self.voice_id or SESSION_DETAILS.voice.id or ""
+        voice_provider, voice_id = resolve_runtime_voice(
+            is_coordinator=SESSION_DETAILS.is_coordinator,
+            voice_provider=voice_provider,
+            voice_id=voice_id,
+        )
         return CallConfig(
             assistant_id=self.assistant_id,
             user_id=self.user_id,
@@ -2710,8 +2714,8 @@ class ConversationManager(metaclass=SingletonABCMeta):
 
         Mirrors two things from Orchestra's ``Coordinator/State`` onto the
         session so ``build_brain_spec`` never has to derive anything:
-          - ``coordinator_onboarding_deferred``: the global "do onboarding
-            later" switch (drops all onboarding scaffolding when set).
+          - ``coordinator_onboarding_active``: whether onboarding scaffolding
+            is live (narration, progress block, tool masking).
           - ``coordinator_onboarding_render``: the precomputed
             depends_on-aware picture (steps + statuses + valid next
             targets with nudge copy) that drives the standing progress
@@ -2731,7 +2735,7 @@ class ConversationManager(metaclass=SingletonABCMeta):
         # Refresh more eagerly while actively onboarding (a render is
         # present) so "what's next" stays fresh during a fast-moving
         # setup conversation; back off once onboarding is done/deferred.
-        ttl = 10.0 if self.coordinator_onboarding_render else 30.0
+        ttl = 10.0 if self.coordinator_onboarding_active else 30.0
         # Stamp before the await so concurrent runs don't stampede the
         # endpoint; a failed fetch still respects the TTL backoff.
         if now - self._coordinator_state_checked_at < ttl:
@@ -2764,18 +2768,197 @@ class ConversationManager(metaclass=SingletonABCMeta):
                     self.onboarding_catalog = (
                         catalog if isinstance(catalog, dict) else None
                     )
-            self.coordinator_onboarding_deferred = bool(info.get("onboarding_deferred"))
-            render = info.get("onboarding")
-            self.coordinator_onboarding_render = (
-                render if isinstance(render, dict) else None
-            )
+            self._apply_coordinator_state_info(info)
         except Exception as exc:
             LOGGER.warning(
                 "Coordinator onboarding-state refresh failed; "
-                "keeping previous values (deferred=%s): %s",
-                self.coordinator_onboarding_deferred,
+                "keeping previous values (active=%s): %s",
+                self.coordinator_onboarding_active,
                 exc,
             )
+
+    def _apply_coordinator_state_info(self, info: dict[str, Any]) -> None:
+        """Mirror onboarding gate + render from a Coordinator/State snapshot."""
+        self.coordinator_onboarding_active = bool(info.get("onboarding_active"))
+        render = info.get("onboarding")
+        self.coordinator_onboarding_render = (
+            render if isinstance(render, dict) else None
+        )
+
+    async def _patch_coordinator_onboarding_active(
+        self,
+        *,
+        active: bool,
+        clear_onboarding_step: bool = False,
+    ) -> dict[str, Any]:
+        """PATCH ``onboarding_active`` on Orchestra and refresh the session cache."""
+        from unify.settings import SETTINGS
+
+        if not self.is_coordinator or not SETTINGS.UNITY_CONSOLE_UI:
+            return {
+                "status": "error",
+                "message": "Onboarding can only be toggled for the workspace Coordinator.",
+            }
+        agent_id = SESSION_DETAILS.assistant.agent_id
+        if agent_id is None:
+            return {
+                "status": "error",
+                "message": "Coordinator agent id is missing.",
+            }
+        body: dict[str, Any] = {"onboarding_active": active}
+        if clear_onboarding_step:
+            body["clear_onboarding_step"] = True
+        import httpx as _httpx
+        import time as _time
+
+        try:
+            async with _httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.patch(
+                    f"{SETTINGS.ORCHESTRA_URL}/assistant/{agent_id}/state",
+                    headers={
+                        "Authorization": f"Bearer {SESSION_DETAILS.unify_key}",
+                    },
+                    json=body,
+                )
+            if resp.status_code == 403:
+                return {
+                    "status": "error",
+                    "message": (
+                        "I do not have permission to change onboarding state "
+                        "in this workspace."
+                    ),
+                }
+            resp.raise_for_status()
+            info = (resp.json() or {}).get("info") or {}
+            if isinstance(info, dict):
+                self._apply_coordinator_state_info(info)
+            self._coordinator_state_checked_at = _time.monotonic()
+            if active:
+                message = (
+                    "Onboarding is live again — the setup checklist and nudges "
+                    "are back."
+                )
+            else:
+                message = (
+                    "Onboarding is paused — they can use the platform normally "
+                    "and resume setup anytime from the Onboarding tab or by "
+                    "asking me."
+                )
+            return {
+                "status": "ok",
+                "message": message,
+                "onboarding_active": self.coordinator_onboarding_active,
+            }
+        except Exception as exc:
+            LOGGER.warning(
+                "Coordinator onboarding_active PATCH failed (active=%s): %s",
+                active,
+                exc,
+            )
+            return {
+                "status": "error",
+                "message": f"Failed to update onboarding state: {exc}",
+            }
+
+    async def _patch_coordinator_onboarding_step_state(
+        self,
+        *,
+        step_id: str,
+        completed: bool,
+    ) -> dict[str, Any]:
+        """PATCH manual onboarding step completion on Orchestra."""
+        from unify.settings import SETTINGS
+
+        if not self.is_coordinator or not SETTINGS.UNITY_CONSOLE_UI:
+            return {
+                "status": "error",
+                "message": (
+                    "Onboarding step completion can only be changed for the "
+                    "workspace Coordinator."
+                ),
+            }
+        agent_id = SESSION_DETAILS.assistant.agent_id
+        if agent_id is None:
+            return {
+                "status": "error",
+                "message": "Coordinator agent id is missing.",
+            }
+        import httpx as _httpx
+        import time as _time
+
+        try:
+            async with _httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.patch(
+                    f"{SETTINGS.ORCHESTRA_URL}/assistant/{agent_id}/state",
+                    headers={
+                        "Authorization": f"Bearer {SESSION_DETAILS.unify_key}",
+                    },
+                    json={
+                        "onboarding_step_completion": {
+                            "step_id": step_id,
+                            "completed": completed,
+                        },
+                    },
+                )
+            payload = resp.json() if resp.content else {}
+            if resp.status_code == 403:
+                return {
+                    "status": "error",
+                    "message": (
+                        "I do not have permission to change onboarding step "
+                        "completion in this workspace."
+                    ),
+                }
+            if resp.status_code == 400:
+                detail = payload.get("detail")
+                if isinstance(detail, dict):
+                    message = detail.get("message") or detail.get("code")
+                else:
+                    message = detail
+                return {
+                    "status": "error",
+                    "message": message or "Invalid onboarding step completion.",
+                    "step_id": step_id,
+                }
+            resp.raise_for_status()
+            info = payload.get("info") or {}
+            if isinstance(info, dict):
+                self._apply_coordinator_state_info(info)
+            self._coordinator_state_checked_at = _time.monotonic()
+            completed_step_ids = (
+                info.get("completed_step_ids")
+                if isinstance(info.get("completed_step_ids"), list)
+                else []
+            )
+            if completed:
+                message = f"Marked '{step_id}' complete in the onboarding checklist."
+            elif step_id in completed_step_ids:
+                message = (
+                    f"Removed my manual completion for '{step_id}', but the "
+                    "checklist still shows it as done because the platform "
+                    "detects it is already complete."
+                )
+            else:
+                message = f"Marked '{step_id}' incomplete in the onboarding checklist."
+            return {
+                "status": "ok",
+                "message": message,
+                "step_id": step_id,
+                "completed": completed,
+            }
+        except Exception as exc:
+            LOGGER.warning(
+                "Coordinator onboarding step completion PATCH failed "
+                "(step_id=%s, completed=%s): %s",
+                step_id,
+                completed,
+                exc,
+            )
+            return {
+                "status": "error",
+                "message": f"Failed to update onboarding step completion: {exc}",
+                "step_id": step_id,
+            }
 
     def set_coordinator_onboarding_render(self, render: Any) -> None:
         """Update the cached onboarding render from a fresh event payload.
@@ -2933,6 +3116,7 @@ class ConversationManager(metaclass=SingletonABCMeta):
             "workspace_calendar": {"unify_message"},
             "workspace_contacts": {"unify_message"},
             "workspace_tasks": {"unify_message"},
+            "workspace_teams": {"unify_message"},
         }.get(str(pending.get("channel", "")), set())
         if medium not in expected_media:
             return None

@@ -14,7 +14,7 @@ sessions. The notification we push here carries only the structured
 event payload + a one-line system instruction; the brain owns the
 phrasing.
 
-Gating on ``Coordinator/State.mode == 'onboarding'`` happens on the
+Gating on ``Coordinator/State.onboarding_active`` happens on the
 orchestra side before the event is ever published, so handlers here
 can assume the user is currently in the onboarding flow. Outside of
 onboarding the helper simply never runs.
@@ -179,16 +179,17 @@ def _coordinator_onboarding_notification_text(
             "way. I send a clue now only if none has gone out yet."
         )
         clue_note = (
-            " I invent my own short reference-quiz clue on the spot — there is "
-            "no supplied clue or answer. I pick a fresh sci-fi or pop-culture "
-            "quote of my own each time and keep the answer to myself."
+            " I invent my own short sci-fi quote clue on the spot — there is "
+            "no supplied clue or answer, and I keep the answer to myself. "
+            "User-facing lines stay minimal (one sentence that we're testing "
+            "the channel with a quick sci-fi quiz); I never list genres or "
+            "franchises."
         )
         framing_note = f" Section framing: {framing}" if framing else ""
         interaction_note = (
-            " Structured interaction: reference_quiz. Explain the quiz before "
-            "sending or discussing any clue; the user should know this is a "
-            "channel-proving mini-game, not a mysterious email. Outbound text "
-            "or email clue messages must include that context before the clue."
+            " Structured interaction: reference_quiz. One short sentence of "
+            "context before the clue — we're testing the channel with a quick "
+            "sci-fi quiz — not a genre list or franchise rundown."
             if isinstance(interaction, dict)
             and interaction.get("type") == "reference_quiz"
             else ""
@@ -395,6 +396,8 @@ async def _handle_coordinator_onboarding_event(
     # no notification, no LLM run — rather than nudge them toward UI steps
     # they cannot see.
     if not SETTINGS.UNITY_CONSOLE_UI:
+        return False
+    if not cm.coordinator_onboarding_active:
         return False
     # Refresh the standing onboarding progress model from the event's
     # attached render so the slow brain's next turn reflects this change

@@ -291,7 +291,7 @@ def build_brain_spec(
         authorized_humans=authorized_humans,
         is_org_workspace=SESSION_DETAILS.org_id is not None,
         console_ui_present=SETTINGS.UNITY_CONSOLE_UI,
-        coordinator_onboarding_deferred=cm.coordinator_onboarding_deferred,
+        coordinator_onboarding_active=cm.coordinator_onboarding_active,
         coordinator_onboarding_render=cm.coordinator_onboarding_render,
         coordinator_clicked_trigger_steps=cm.onboarding_clicked_trigger_steps,
         onboarding_catalog=cm.onboarding_catalog,

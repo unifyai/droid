@@ -1931,6 +1931,85 @@ class ConversationManagerBrainActionTools:
         )
         return {"status": "updated", "updates": updates}
 
+    async def deactivate_onboarding(self) -> dict[str, Any]:
+        """Pause the global onboarding flow so my boss can use the platform normally.
+
+        **Only call after my boss has verbally confirmed** they want to pause
+        onboarding — not merely hinted, not while I am mid-explanation, and
+        not when they are deferring a single checklist row (that is a per-row
+        UI control, not a global pause).
+
+        **Call when:** they clearly want to stop setup for now and have
+        confirmed after I restate intent — e.g. "Yes, pause it", "Let's do
+        that", "I'll finish setup later" in direct answer to my confirmation
+        question.
+
+        **Do not call when:** I am suggesting pause proactively; they asked
+        what pause means; they said "skip this step" (row defer only); they
+        have not answered a confirmation question; onboarding is already
+        inactive; they only want help with a normal task while onboarding is
+        still active (answer normally instead).
+
+        After success: tell them onboarding is paused, they can ask for help
+        normally, and they can resume later from the **Onboarding** tab in
+        Assistant info or by asking me to continue setup.
+        """
+        return await self._cm._patch_coordinator_onboarding_active(
+            active=False,
+            clear_onboarding_step=True,
+        )
+
+    async def activate_onboarding(self) -> dict[str, Any]:
+        """Resume the global onboarding checklist and nudges.
+
+        **Only call after my boss has verbally confirmed** they want to return
+        to setup — not when they are asking a one-off product question while
+        onboarding is paused (answer normally without reactivating).
+
+        **Call when:** they ask to resume or finish setup and confirm after I
+        restate intent — e.g. "Yes, let's continue onboarding", "Take me back
+        to the checklist".
+
+        **Do not call when:** onboarding is already active; they have not
+        confirmed; they only asked how to open the Onboarding tab (give
+        directions instead); the Console **Return to onboarding** button is
+        enough and they did not ask me to flip it.
+
+        After success: confirm onboarding is live again and guide them to the
+        first valid next step from my live onboarding progress block (if any).
+        """
+        return await self._cm._patch_coordinator_onboarding_active(active=True)
+
+    async def set_onboarding_task_state(
+        self,
+        step_id: str,
+        completed: bool,
+    ) -> dict[str, Any]:
+        """Mark one onboarding checklist step complete or incomplete.
+
+        Use the ``step_id`` values from my live onboarding progress block
+        (for example ``apps``, ``create-scheduled-task``). Communication
+        rows and auto-triggered checklist actions complete on their own —
+        if this tool returns an error, relay that explanation rather than
+        guessing which steps are settable.
+
+        **Call when:** I have finished onboarding work that the checklist
+        cannot detect yet (semantic setup, guided walkthroughs outside
+        Communication) and the user agrees the step is done — or when I need
+        to undo a manual completion I set earlier.
+
+        **Do not call when:** onboarding is inactive; the step is in the
+        Communication section; the user only clicked a checklist row that
+        auto-starts an action; or I have not actually done the work.
+
+        After success: confirm briefly and continue from the refreshed
+        onboarding progress block.
+        """
+        return await self._cm._patch_coordinator_onboarding_step_state(
+            step_id=step_id,
+            completed=completed,
+        )
+
     async def wait(
         self,
         delay: int | None = None,
@@ -2207,11 +2286,18 @@ class ConversationManagerBrainActionTools:
         # During onboarding, withhold a reference-quiz channel's send tool until
         # the user clicks its trigger row (this session) or the step durably
         # completes — so T-W1N cannot send an untagged clue proactively.
-        for name in masked_reference_quiz_tools(
-            self._cm.coordinator_onboarding_render,
-            self._cm.onboarding_clicked_trigger_steps,
-        ):
-            tools.pop(name, None)
+        if self._cm.coordinator_onboarding_active:
+            for name in masked_reference_quiz_tools(
+                self._cm.coordinator_onboarding_render,
+                self._cm.onboarding_clicked_trigger_steps,
+            ):
+                tools.pop(name, None)
+        if is_coordinator and SETTINGS.UNITY_CONSOLE_UI:
+            if self._cm.coordinator_onboarding_active:
+                tools["deactivate_onboarding"] = self.deactivate_onboarding
+                tools["set_onboarding_task_state"] = self.set_onboarding_task_state
+            else:
+                tools["activate_onboarding"] = self.activate_onboarding
         return tools
 
     def build_action_steering_tools(self) -> dict[str, "Callable[..., Any]"]:

@@ -612,27 +612,37 @@ _EXTERNAL_APP_INTEGRATION = textwrap.dedent("""
        confirming their names via `primitives.secrets.ask(...)`. For provider
        SDKs that can read OAuth credentials from environment variables, prefer
        the SDK's normal/default credential behavior. When a provider SDK,
-       client, or direct HTTP request requires an explicit refresh-token backed
-       OAuth access token, use the sandbox helper
-       `get_oauth_access_token(provider)` instead of reading access-token env
-       vars directly.
+       client, or direct HTTP request needs a connected-account (BYOD) OAuth
+       call, use the sandbox helper `get_oauth_access_token(provider)` together
+       with the local workspace proxy base URL — never the real provider hosts
+       directly. The sandbox holds no real provider token by design; the local
+       proxy injects it and enforces access.
 
        ```python
-       microsoft_token = get_oauth_access_token("microsoft")
-       google_token = get_oauth_access_token("google")
+       import os, httpx
+       token = get_oauth_access_token("microsoft")
+       base = os.environ["MICROSOFT_GRAPH_BASE"]  # ~ https://graph.microsoft.com/v1.0
+       resp = httpx.get(
+           f"{base}/me/drive/root/children",
+           headers={"Authorization": f"Bearer {token}"},
+       )
        ```
 
-       **Connected-account files are off-limits to raw API calls.** Reading,
-       listing, or searching files and folders in the connected Google Drive /
-       Shared Drives or OneDrive / SharePoint libraries MUST go through
-       `primitives.workspace_files.*` (`list_roots`, `list_children`,
-       `search`, `get_item`, `read_file`). That manager enforces the
-       per-assistant file-access allowlist and masks anything the user has not
-       permitted, so disallowed items simply appear not to exist. Do NOT call
-       the Google Drive or Microsoft Graph file/drive/site endpoints directly
-       with `get_oauth_access_token(...)` — that bypasses the allowlist and is
-       not permitted. `get_oauth_access_token(...)` remains appropriate for
-       non-file provider APIs (e.g. calendar, contacts, tasks).
+       For Google use `os.environ["GOOGLE_DRIVE_BASE"]` (~
+       `https://www.googleapis.com/drive/v3`) or `GOOGLE_API_BASE` for other
+       Google services. Provider SDKs work too — point the client's base/endpoint
+       at the proxy (e.g. msgraph's `request_adapter.base_url`, googleapiclient's
+       `client_options.api_endpoint`).
+
+       **The proxy gives you the FULL provider REST API but enforces the
+       file-access allowlist.** You have the complete Microsoft Graph / Google
+       Drive surface (list, search, read, rename, move, upload, delete,
+       `$batch`, ...). Files and folders the user has not permitted are masked:
+       absent from listings/search and not-found on direct access, and writes
+       into a non-permitted location are rejected. Treat masked items as
+       nonexistent. Calls to `graph.microsoft.com` or `www.googleapis.com`
+       directly carry no valid token and will fail — always use the proxy base
+       URLs above.
 
        **The connected mailbox has a first-class surface.** To send from, or
        read/search, the user's own connected Gmail/Outlook mailbox, use

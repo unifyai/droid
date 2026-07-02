@@ -32,6 +32,15 @@ async def test_shell_runtime_oauth_token_helper_uses_parent_rpc(monkeypatch):
         "get_secret_manager",
         lambda: fake_secret_manager,
     )
+    # The sandbox-facing helper now returns the local proxy capability handle,
+    # not a raw token. The parent RPC resolves it via the proxy session.
+    from unify.provider_proxy.session import ProxySession
+
+    session = ProxySession(host="127.0.0.1", port=4321, nonce="proxy-nonce")
+    monkeypatch.setattr(
+        "unify.provider_proxy.proxy.ensure_proxy_running",
+        lambda: session,
+    )
 
     fm = object.__new__(FunctionManager)
     result = await fm.execute_shell_script(
@@ -39,7 +48,7 @@ async def test_shell_runtime_oauth_token_helper_uses_parent_rpc(monkeypatch):
             "#!/bin/sh\n"
             "token=$(unity-primitive runtime get_oauth_access_token "
             "--provider google --min_ttl_seconds 42)\n"
-            'if [ "$token" = \'"google-token"\' ]; then echo "TOKEN_OK"; fi\n'
+            'if [ "$token" = \'"proxy-nonce"\' ]; then echo "TOKEN_OK"; fi\n'
         ),
         language="sh",
     )
@@ -47,7 +56,8 @@ async def test_shell_runtime_oauth_token_helper_uses_parent_rpc(monkeypatch):
     assert result["error"] is None
     assert result["result"] == 0
     assert "TOKEN_OK" in result["stdout"]
-    assert fake_secret_manager.sync_reasons == ["oauth_access_token:google"]
+    # The handle path does not touch the assistant-secret sync.
+    assert fake_secret_manager.sync_reasons == []
 
 
 def test_runtime_oauth_env_overlay_routes_through_runtime_helper(monkeypatch):
